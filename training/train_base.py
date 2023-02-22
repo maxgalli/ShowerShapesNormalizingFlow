@@ -9,7 +9,7 @@ import pandas as pd
 import dask.dataframe as dd
 import sys
 import itertools
-from sklearn.externals.joblib import dump, load
+from joblib import dump, load
 
 import torch
 from torch import nn

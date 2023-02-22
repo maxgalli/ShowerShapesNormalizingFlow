@@ -13,6 +13,4 @@
 #SBATCH --time=10:00:00
 #SBATCH --gres-flags=disable-binding    
 
-export LD_LIBRARY_PATH=/work/gallim/miniconda3/lib:/work/gallim/anaconda3/lib
-
-/work/gallim/mambaforge/envs/FFF2/bin/python /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/train_base.py --config-name {param1} general.sample={param2} general.calo={param3}
+/work/gallim/mambaforge/envs/FFF-minimal/bin/python /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/train_base.py --config-name {param1} general.sample={param2} general.calo={param3}
