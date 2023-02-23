@@ -76,6 +76,12 @@ class ParquetDataset(Dataset):
     def dump_scaler(self, path):
         dump(self.scaler, path)
 
+    def scale_back(self):
+        y = self.df.values
+        y_scaled = self.scaler.inverse_transform(y)
+        for i, col in enumerate(self.columns):
+            self.df[col] = y_scaled[:, i]
+
     def __len__(self):
         return len(self.df)
 
@@ -296,7 +302,7 @@ def main(cfg):
                         #flow = flow.cpu()
                         sample = flow.sample(nsample, context=xcond)
                         # keep only the appropriate columns
-                        sample = sample[:, columns.index(c1):columns.index(c2) + 1]
+                        sample = sample[:, [columns.index(c1), columns.index(c2)]]
                         x = sample.reshape(sample.shape[0]*sample.shape[1], sample.shape[2])
                         #plt.hist2d(x[:, 0].numpy(), x[:, 1].numpy(), bins=100, range=[[-0.5, 1.5], [-0.2 ,1.2]], norm=matplotlib.colors.LogNorm())
                         axs[1].hist2d(x[:, 0].cpu().numpy(), x[:, 1].cpu().numpy(), bins=100, norm=matplotlib.colors.LogNorm())
