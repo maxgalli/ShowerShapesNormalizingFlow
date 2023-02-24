@@ -157,6 +157,52 @@ def spline_inn(
     return transforms.CompositeTransform(transform_list)
 
 
+def dump_validation_plots(flow, valdataset, columns, condition_columns, nsample, device, path, epoch):
+    epoch = str(epoch + 1) if type(epoch) == int else epoch
+    print("Dumping validation plots")
+    ncond = len(condition_columns)
+    xcond = torch.tensor(valdataset.df.values[:, :ncond].astype(np.float32)).to(device)
+    with torch.no_grad():
+        sample = flow.sample(nsample, context=xcond)
+    pairs = [p for p in itertools.combinations(columns, 2)]
+    for pair in pairs:
+        c1, c2 = pair
+        print(f"Plotting {pair}")
+        fig, axs = plt.subplots(1, 2, figsize=(10, 5))
+        axs[0].hist2d(valdataset.df[c1], valdataset.df[c2], bins=100, norm=matplotlib.colors.LogNorm())
+        axs[0].set_xlabel(c1)
+        axs[0].set_ylabel(c2)
+        axs[0].set_title("Validation data")
+    
+        #print(sample.shape)
+        #print(columns.index(c1), columns.index(c2))
+        # keep only the appropriate columns
+        sub_sample = sample[:, :, [columns.index(c1), columns.index(c2)]]
+        #print(sample.shape)
+        x = sub_sample.reshape(sub_sample.shape[0]*sub_sample.shape[1], sub_sample.shape[2])
+        #print(x.shape)
+        #plt.hist2d(x[:, 0].numpy(), x[:, 1].numpy(), bins=100, range=[[-0.5, 1.5], [-0.2 ,1.2]], norm=matplotlib.colors.LogNorm())
+        axs[1].hist2d(x[:, 0].cpu().numpy(), x[:, 1].cpu().numpy(), bins=100, norm=matplotlib.colors.LogNorm())
+        axs[1].set_xlabel(c1)
+        axs[1].set_ylabel(c2)
+        axs[1].set_title("Sampled data")
+        fig.savefig(f"{path}/epoch_{epoch}_{c1}-{c2}.png")
+
+    if nsample == 1:
+        for column in columns:
+            for cond_column in condition_columns:
+                print(f"Plotting {column} ratio vs {cond_column}")
+                sub_sample = sample[:, :, columns.index(column)]
+                x = sub_sample.reshape(sub_sample.shape[0]*sub_sample.shape[1])
+                r = x.cpu().numpy() / valdataset.df[column].values
+                fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+                ax.hist2d(valdataset.df[cond_column], r, bins=100, range=[None, [-29, 31]], norm=matplotlib.colors.LogNorm())
+                ax.set_xlabel(cond_column)
+                ax.set_ylabel(f"{column} ratio")
+                ax.set_title(f"{column} ratio vs {cond_column}")
+                fig.savefig(f"{path}/epoch_{epoch}_{column}_ratio_vs_{cond_column}.png")
+
+
 @hydra.main(version_base=None, config_path="config", config_name="cfg0")
 def main(cfg):
     print("Configuring job with following options")
@@ -283,33 +329,7 @@ def main(cfg):
 
             # dump validation plots only at the end and at the middle of the training
             if (epoch == n_epochs - 1) or (epoch == n_epochs/2):
-                print("Dumping validation plots")
-                pairs = [p for p in itertools.combinations(columns, 2)]
-                for pair in pairs:
-                    c1, c2 = pair
-                    print(f"Plotting {pair}")
-                    fig, axs = plt.subplots(1, 2, figsize=(10, 5))
-                    axs[0].hist2d(valdataset.df[c1], valdataset.df[c2], bins=100, norm=matplotlib.colors.LogNorm())
-                    axs[0].set_xlabel(c1)
-                    axs[0].set_ylabel(c2)
-                    axs[0].set_title("Validation data")
-                
-                    xcond = torch.tensor(valdataset.df.values[:, :ncond].astype(np.float32)).to(device)
-                    nsample = 5
-                    with torch.no_grad():
-                        #sample = flow.sample(nsample, context=xcond)
-                        # move model to cpu to sample
-                        #flow = flow.cpu()
-                        sample = flow.sample(nsample, context=xcond)
-                        # keep only the appropriate columns
-                        sample = sample[:, [columns.index(c1), columns.index(c2)]]
-                        x = sample.reshape(sample.shape[0]*sample.shape[1], sample.shape[2])
-                        #plt.hist2d(x[:, 0].numpy(), x[:, 1].numpy(), bins=100, range=[[-0.5, 1.5], [-0.2 ,1.2]], norm=matplotlib.colors.LogNorm())
-                        axs[1].hist2d(x[:, 0].cpu().numpy(), x[:, 1].cpu().numpy(), bins=100, norm=matplotlib.colors.LogNorm())
-                        axs[1].set_xlabel(c1)
-                        axs[1].set_ylabel(c2)
-                        axs[1].set_title("Sampled data")
-                        fig.savefig(f"{outputpath_str}/epoch_{epoch + 1}_{c1}-{c2}.png")
+                dump_validation_plots(flow, valdataset, columns, condition_columns, 5, device, outputpath_str, epoch)
 
         # plot losses
         fig, ax = plt.subplots(1, 1, figsize=(10, 5))
