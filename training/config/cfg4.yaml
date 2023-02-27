@@ -1,6 +1,6 @@
 output:
   save_dir: output
-  name: cfg2
+  name: cfg4
 general:
   sample: mc
   calo: eb
@@ -42,20 +42,20 @@ base:
     coupling_width: 32
     coupling_depth: 2
 top_transformer_eb:
-  load_path: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg2/top_eb/epoch_10_valloss_1.578.pt
+  load_path: None
   load_path_data: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg2/data_eb/epoch_19_valloss_1.597.pt
   load_path_mc: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg2/mc_eb/epoch_18_valloss_1.541.pt
-  batch_size: 128
+  batch_size: 64
   lr: 0.0001
-  nepochs: 10
+  nepochs: 12
   flow4flow: delta
   direction: alternate
   iteration_steps: 5
   gclip: 5
-  nstack: 4
-  nblocks: 2
+  nstack: 8
+  nblocks: 8
   nnodes: 64
-  nbins: 8
+  nbins: 30
   activation: relu
   coupling: false
   coupling_width: 32

@@ -1,15 +1,19 @@
 output:
   save_dir: output
-  name: cfg2
+  name: cfg_test
 general:
   sample: mc
   calo: eb
   condition_columns:
     - probe_pt
+    - probe_eta
+    - probe_phi
+    - probe_fixedGridRhoAll
   columns:
     - probe_r9
     - probe_s4
-  nevents: 100000
+    - probe_sieie
+  nevents: 100
 base:
   mc_eb:
     load_path: None
@@ -17,8 +21,8 @@ base:
     lr: 0.0001
     nepochs: 20
     gclip: 5
-    nstack: 6
-    nblocks: 6
+    nstack: 4
+    nblocks: 4
     nnodes: 64
     tail_bound: 4.0
     nbins: 30
@@ -32,8 +36,8 @@ base:
     lr: 0.0001
     nepochs: 20
     gclip: 5
-    nstack: 6
-    nblocks: 6
+    nstack: 4
+    nblocks: 4
     nnodes: 64
     tail_bound: 4.0
     nbins: 30
@@ -42,19 +46,19 @@ base:
     coupling_width: 32
     coupling_depth: 2
 top_transformer_eb:
-  load_path: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg2/top_eb/epoch_10_valloss_1.578.pt
-  load_path_data: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg2/data_eb/epoch_19_valloss_1.597.pt
-  load_path_mc: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg2/mc_eb/epoch_18_valloss_1.541.pt
+  load_path: None
+  load_path_data: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg_test/data_eb/epoch_19_valloss_5.279.pt
+  load_path_mc: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg_test/mc_eb/epoch_20_valloss_4.314.pt
   batch_size: 128
   lr: 0.0001
   nepochs: 10
-  flow4flow: delta
-  direction: alternate
+  flow4flow: customcontext
+  direction: forward
   iteration_steps: 5
   gclip: 5
   nstack: 4
   nblocks: 2
-  nnodes: 64
+  nnodes: 128
   nbins: 8
   activation: relu
   coupling: false

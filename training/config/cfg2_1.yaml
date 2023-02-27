@@ -1,6 +1,6 @@
 output:
   save_dir: output
-  name: cfg2
+  name: cfg2_1
 general:
   sample: mc
   calo: eb
@@ -48,7 +48,7 @@ top_transformer_eb:
   batch_size: 128
   lr: 0.0001
   nepochs: 10
-  flow4flow: delta
+  flow4flow: concat
   direction: alternate
   iteration_steps: 5
   gclip: 5
