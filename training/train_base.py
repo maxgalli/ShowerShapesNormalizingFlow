@@ -42,6 +42,7 @@ from nflows.transforms.normalization import BatchNorm
 from nflows.nn.nets import ResidualNet
 import matplotlib
 from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import FunctionTransformer
 
 from nflows import transforms, flows
 from torch.nn import functional as F
@@ -62,23 +63,44 @@ class ParquetDataset(Dataset):
             self.df = self.df.iloc[:nevs]
 
         self.df = self.df[self.df["probe_pt"] < 200]
+        # scale pt
+        self.pt_transformer = FunctionTransformer(np.log1p, validate=True)
+        pt_scaled = self.pt_transformer.transform(self.df['probe_pt'].to_numpy().reshape(-1, 1))
+
+        # scale the rest
+        df_no_pt = self.df.drop(columns=['probe_pt'])
+        y = df_no_pt.values
         if scaler is None:
             self.scaler = StandardScaler()
-            y = self.df.values
             self.scaler.fit(y)
         else:
+            print(f"Loading scaler from file {scaler}")
             self.scaler = load(scaler)
-            y = self.df.values
         y_scaled = self.scaler.transform(y)
-        for i, col in enumerate(columns):
-            self.df[col] = y_scaled[:, i]
+        # insert pt back in the correct place
+        pt_index = self.columns.index('probe_pt')
+        y_scaled = np.insert(y_scaled, pt_index, pt_scaled[:, 0], axis=1)
+        self.df = pd.DataFrame(y_scaled, columns=self.columns)
 
     def dump_scaler(self, path):
         dump(self.scaler, path)
+        dump(self.pt_transformer, path.replace(".save", "_pt.save"))
+
+    def get_scaled_back_array(self):
+        # scale back pt
+        pt_scaled = self.df['probe_pt'].to_numpy().reshape(-1, 1)
+        pt = self.pt_transformer.inverse_transform(pt_scaled)
+        # scale back the rest
+        df_no_pt = self.df.drop(columns=['probe_pt'])
+        y_scaled = df_no_pt.values
+        y = self.scaler.inverse_transform(y_scaled)
+        # insert pt back in the correct place
+        pt_index = self.columns.index('probe_pt')
+        y = np.insert(y, pt_index, pt[:, 0], axis=1)
+        return y
 
     def scale_back(self):
-        y = self.df.values
-        y_scaled = self.scaler.inverse_transform(y)
+        y_scaled = self.get_scaled_back_array()
         for i, col in enumerate(self.columns):
             self.df[col] = y_scaled[:, i]
 
