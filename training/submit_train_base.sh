@@ -2,8 +2,8 @@
 
 # Define the parameters
 params=(
-  "cfg9 mc eb"
-  "cfg9 data eb"
+  "cfg13 mc eb"
+  "cfg13 data eb"
 )
 
 # Loop over the parameters
