@@ -16,7 +16,7 @@ general:
     - probe_sieip
     - probe_etaWidth
     - probe_phiWidth
-  nevents: 100000
+  nevents: 100
 base:
   mc_eb:
     load_path: None

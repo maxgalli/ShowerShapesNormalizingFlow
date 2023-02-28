@@ -61,6 +61,7 @@ top_transformer_eb:
   nblocks: 2
   nnodes: 64
   nbins: 8
+  tail_bound: 6.0
   activation: relu
   coupling: false
   coupling_width: 32
