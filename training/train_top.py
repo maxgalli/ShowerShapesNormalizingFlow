@@ -64,6 +64,49 @@ from ffflows.models import (
 from ffflows import distance_penalties
 from ffflows.distance_penalties import AnnealedPenalty
 from ffflows.data.dist_to_dist import ConditionalDataToData, ConditionalDataToTarget
+from ffflows.distance_penalties import BasePenalty
+
+
+class FFFCustom(flows.Flow):
+    """
+    MC = left
+    Data = right
+    forward: MC -> Data
+    inverse: Data -> MC
+    """
+    def __init__(self, transform, flow_mc, flow_data, embedding_net=None):
+        super().__init__(transform, flow_mc, embedding_net)
+        self.flow_mc = flow_mc
+        self.flow_data = flow_data
+
+    def add_penalty(self, penalty_object):
+        """Add a distance penaly object to the class."""
+        assert isinstance(penalty_object, BasePenalty)
+        self.distance_object = penalty_object
+
+    def base_flow_log_prob(self, inputs, input_context, target_context=None, inverse=False):
+        if inverse:
+            return self.flow_data.log_prob(inputs, input_context)
+        else:
+            return self.flow_mc.log_prob(inputs, input_context)
+
+    def transform(self, inputs, input_context, target_context=None, inverse=False):
+        context = self._embedding_net(input_context)
+        transform = self._transform.inverse if inverse else self._transform
+        y, logabsdet = transform(inputs, context)
+
+        return y, logabsdet
+
+    def log_prob(self, inputs, input_context, target_context=None, inverse=False):
+        converted_input, logabsdet = self.transform(inputs, input_context, target_context, inverse=inverse)
+        log_prob = self.base_flow_log_prob(converted_input, input_context, target_context, inverse=inverse)
+        dist_pen = -self.distance_object(converted_input, inputs)
+
+        return log_prob + logabsdet + dist_pen
+
+    def batch_transform(self, inputs, input_context, target_context=None, inverse=False):
+        # implemented just to keep the same interface
+        return self.transform(inputs, input_context, target_context, inverse=inverse)
 
 
 def get_flow4flow(name, *args, **kwargs):
@@ -410,22 +453,39 @@ def main(cfg):
     val_mcloader = DataLoader(mc_val_dataset, batch_size=cfg.base[f"mc_{calo}"].batch_size, shuffle=True)
     #print(len(d_dataset), len(mc_dataset), len(val_dataset), len(mc_val_dataset))
 
-    f4flow = get_flow4flow(
-        top_transformer.flow4flow,
-        spline_inn(
-            len(columns),
-            nodes=top_transformer.nnodes,
-            num_blocks=top_transformer.nblocks,
-            num_stack=top_transformer.nstack,
-            tail_bound=top_transformer.tail_bound,
-            activation=getattr(F, top_transformer.activation),
-            num_bins=top_transformer.nbins,
-            context_features=ncond,
-            flow_for_flow=True,
-        ),
-        distribution_right=data_base_flow,
-        distribution_left=mc_base_flow,
-    )
+    if top_transformer.flow4flow != "FFFCustom":
+        f4flow = get_flow4flow(
+            top_transformer.flow4flow,
+            spline_inn(
+                len(columns),
+                nodes=top_transformer.nnodes,
+                num_blocks=top_transformer.nblocks,
+                num_stack=top_transformer.nstack,
+                tail_bound=top_transformer.tail_bound,
+                activation=getattr(F, top_transformer.activation),
+                num_bins=top_transformer.nbins,
+                context_features=ncond,
+                flow_for_flow=True,
+            ),
+            distribution_right=data_base_flow,
+            distribution_left=mc_base_flow,
+        )
+    else:
+        f4flow = FFFCustom(
+            spline_inn(
+                len(columns),
+                nodes=top_transformer.nnodes,
+                num_blocks=top_transformer.nblocks,
+                num_stack=top_transformer.nstack,
+                tail_bound=top_transformer.tail_bound,
+                activation=getattr(F, top_transformer.activation),
+                num_bins=top_transformer.nbins,
+                context_features=ncond,
+                flow_for_flow=True,
+            ),
+            mc_base_flow,
+            data_base_flow,
+        )
     set_penalty(
         f4flow,
         top_transformer.penalty,
@@ -491,9 +551,9 @@ def main(cfg):
     # shuffle test datasets
     test_dataset.df = test_dataset.df.sample(frac=1).reset_index(drop=True)
     test_mc.df = test_mc.df.sample(frac=1).reset_index(drop=True)
-    min_evs_test = min(len(test_dataset), len(test_mc))
-    test_dataset.df = test_dataset.df.iloc[:min_evs_test]
-    test_mc.df = test_mc.df.iloc[:min_evs_test]
+    #min_evs_test = min(len(test_dataset), len(test_mc))
+    #test_dataset.df = test_dataset.df.iloc[:min_evs_test]
+    #test_mc.df = test_mc.df.iloc[:min_evs_test]
     inputs = torch.tensor(test_mc.df.values[:, ncond:]).to(device)
     context_l = torch.tensor(test_mc.df.values[:, :ncond]).to(device)
     context_r = torch.tensor(test_dataset.df.values[:, :ncond]).to(device)
