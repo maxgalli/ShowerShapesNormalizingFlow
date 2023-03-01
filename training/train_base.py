@@ -42,6 +42,12 @@ from nflows.transforms.normalization import BatchNorm
 from nflows.nn.nets import ResidualNet
 import matplotlib
 from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import PowerTransformer
+from sklearn.preprocessing import MaxAbsScaler
+from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import QuantileTransformer
+from sklearn.preprocessing import Normalizer
 from sklearn.preprocessing import FunctionTransformer
 
 from nflows import transforms, flows
@@ -52,7 +58,7 @@ torch.manual_seed(42)
 
 
 class ParquetDataset(Dataset):
-    def __init__(self, files, columns, nevs=None, scaler=None):
+    def __init__(self, files, columns, nevs=None, scaler="minmax", rng=(-5, 5)):
         self.columns = columns
         # self.df = dd.read_parquet(files, columns=columns, engine='fastparquet')
         self.df = dd.read_parquet(
@@ -62,24 +68,27 @@ class ParquetDataset(Dataset):
         if nevs is not None:
             self.df = self.df.iloc[:nevs]
 
-        self.df = self.df[self.df["probe_pt"] < 200]
+        #self.df = self.df[self.df["probe_pt"] < 200]
         # scale pt
         self.pt_transformer = FunctionTransformer(np.log1p, validate=True)
-        pt_scaled = self.pt_transformer.transform(self.df['probe_pt'].to_numpy().reshape(-1, 1))
-
-        # scale the rest
-        df_no_pt = self.df.drop(columns=['probe_pt'])
-        y = df_no_pt.values
-        if scaler is None:
+        self.df["probe_pt"] = self.pt_transformer.transform(self.df['probe_pt'].to_numpy().reshape(-1, 1))
+        y = self.df.values
+        if scaler == "minmax":
+            self.scaler = MinMaxScaler(rng)
+        elif scaler == "standard":
             self.scaler = StandardScaler()
-            self.scaler.fit(y)
-        else:
-            print(f"Loading scaler from file {scaler}")
-            self.scaler = load(scaler)
+        elif scaler == "maxabs":
+            self.scaler = MaxAbsScaler()
+        elif scaler == "robust":
+            self.scaler = RobustScaler()
+        elif scaler == "poweryeo":
+            self.scaler = PowerTransformer(method='yeo-johnson')
+        elif scaler == "qtgaus":
+            self.scaler = QuantileTransformer(output_distribution='normal')
+        elif scaler == "normalizer":
+            self.scaler = Normalizer()
+        self.scaler.fit(y)
         y_scaled = self.scaler.transform(y)
-        # insert pt back in the correct place
-        pt_index = self.columns.index('probe_pt')
-        y_scaled = np.insert(y_scaled, pt_index, pt_scaled[:, 0], axis=1)
         self.df = pd.DataFrame(y_scaled, columns=self.columns)
 
     def dump_scaler(self, path):
@@ -87,17 +96,12 @@ class ParquetDataset(Dataset):
         dump(self.pt_transformer, path.replace(".save", "_pt.save"))
 
     def get_scaled_back_array(self):
+        y_scaled_back = self.scaler.inverse_transform(self.df.values)
         # scale back pt
-        pt_scaled = self.df['probe_pt'].to_numpy().reshape(-1, 1)
-        pt = self.pt_transformer.inverse_transform(pt_scaled)
-        # scale back the rest
-        df_no_pt = self.df.drop(columns=['probe_pt'])
-        y_scaled = df_no_pt.values
-        y = self.scaler.inverse_transform(y_scaled)
-        # insert pt back in the correct place
-        pt_index = self.columns.index('probe_pt')
-        y = np.insert(y, pt_index, pt[:, 0], axis=1)
-        return y
+        pt_index = self.columns.index("probe_pt")
+        pt_scaled_back = self.pt_transformer.inverse_transform(y_scaled_back[:, pt_index].reshape(-1, 1))
+        y_scaled_back[:, pt_index] = pt_scaled_back
+        return y_scaled_back
 
     def scale_back(self):
         y_scaled = self.get_scaled_back_array()
@@ -179,7 +183,7 @@ def spline_inn(
     return transforms.CompositeTransform(transform_list)
 
 
-def dump_validation_plots(flow, valdataset, columns, condition_columns, nsample, device, path, epoch):
+def dump_validation_plots(flow, valdataset, columns, condition_columns, nsample, device, path, epoch, rng=(-5, 5)):
     epoch = str(epoch + 1) if type(epoch) == int else epoch
     print("Dumping validation plots")
     ncond = len(condition_columns)
@@ -191,7 +195,7 @@ def dump_validation_plots(flow, valdataset, columns, condition_columns, nsample,
         c1, c2 = pair
         print(f"Plotting {pair}")
         fig, axs = plt.subplots(1, 2, figsize=(10, 5))
-        axs[0].hist2d(valdataset.df[c1], valdataset.df[c2], bins=100, norm=matplotlib.colors.LogNorm())
+        axs[0].hist2d(valdataset.df[c1], valdataset.df[c2], bins=100, range=[rng, rng], norm=matplotlib.colors.LogNorm())
         axs[0].set_xlabel(c1)
         axs[0].set_ylabel(c2)
         axs[0].set_title("Validation data")
@@ -204,12 +208,45 @@ def dump_validation_plots(flow, valdataset, columns, condition_columns, nsample,
         x = sub_sample.reshape(sub_sample.shape[0]*sub_sample.shape[1], sub_sample.shape[2])
         #print(x.shape)
         #plt.hist2d(x[:, 0].numpy(), x[:, 1].numpy(), bins=100, range=[[-0.5, 1.5], [-0.2 ,1.2]], norm=matplotlib.colors.LogNorm())
-        axs[1].hist2d(x[:, 0].cpu().numpy(), x[:, 1].cpu().numpy(), bins=100, norm=matplotlib.colors.LogNorm())
+        axs[1].hist2d(x[:, 0].cpu().numpy(), x[:, 1].cpu().numpy(), bins=100, range=[rng, rng], norm=matplotlib.colors.LogNorm())
         axs[1].set_xlabel(c1)
         axs[1].set_ylabel(c2)
         axs[1].set_title("Sampled data")
         fig.savefig(f"{path}/epoch_{epoch}_{c1}-{c2}.png")
 
+    # now plot in bins of the condition columns
+    nbins = 4
+    for column in columns:
+        fig, ax = plt.subplots(len(condition_columns), 2, figsize=(10, 5*nbins))
+        for row, cond_column in enumerate(condition_columns):
+            # divide into 4 bins 
+            bins = np.linspace(valdataset.df[cond_column].min(), valdataset.df[cond_column].max(), nbins+1)
+            cond_arr = valdataset.df[cond_column].values
+            cond_arr_rep = np.repeat(cond_arr, nsample)
+            for left_edge, right_edge in zip(bins[:-1], bins[1:]):
+                left_edge_label = f"{left_edge:.2f}"
+                right_edge_label = f"{right_edge:.2f}"
+                print(f"Plotting {column} in bin {left_edge_label} to {right_edge_label} of {cond_column}")
+                # plot valdata
+                arr = valdataset.df[(valdataset.df[cond_column] > left_edge) & (valdataset.df[cond_column] < right_edge)]
+                ax[row, 0].hist2d(arr[cond_column], arr[column], bins=100, range=[rng, rng], norm=matplotlib.colors.LogNorm())
+                ax[row, 0].set_xlabel(cond_column)
+                ax[row, 0].set_ylabel(column)
+                ax[row, 0].set_title(f"{column} in bin {left_edge_label} to {right_edge_label} of {cond_column}")
+
+                # plot sample
+                sub_sample = sample[:, :, columns.index(column)]
+                x = sub_sample.reshape(sub_sample.shape[0]*sub_sample.shape[1])
+                # concatenate cond_arr_rep and x and keep only values in bin
+                arr = np.concatenate((cond_arr_rep.reshape(-1, 1), x.cpu().numpy().reshape(-1, 1)), axis=1)
+                arr = arr[(arr[:, 0] > left_edge) & (arr[:, 0] < right_edge)]
+                ax[row, 1].hist2d(arr[:, 0], arr[:, 1], bins=100, range=[rng, rng], norm=matplotlib.colors.LogNorm())
+                ax[row, 1].set_xlabel(cond_column)
+                ax[row, 1].set_ylabel(column)
+                ax[row, 1].set_title(f"{column} in bin {left_edge_label} to {right_edge_label} of {cond_column}")
+        fig.savefig(f"{path}/epoch_{epoch}_{column}_condbins.png")
+
+    """
     if nsample == 1:
         for column in columns:
             for cond_column in condition_columns:
@@ -223,6 +260,7 @@ def dump_validation_plots(flow, valdataset, columns, condition_columns, nsample,
                 ax.set_ylabel(f"{column} ratio")
                 ax.set_title(f"{column} ratio vs {cond_column}")
                 fig.savefig(f"{path}/epoch_{epoch}_{column}_ratio_vs_{cond_column}.png")
+    """
 
 
 @hydra.main(version_base=None, config_path="config", config_name="cfg0")
@@ -242,6 +280,7 @@ def main(cfg):
     with open(f"{outputpath_base_str}/{cfg.output.name}.yaml", "w") as file:
         OmegaConf.save(config=cfg, f=file)
     nevs = cfg.general.nevents
+    scaler = cfg.general.scaler
 
     # Set device
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -269,10 +308,11 @@ def main(cfg):
 
     base_conf = cfg.base[f"{sample}_{calo}"]
 
-    datadataset = ParquetDataset(files=train_file, columns=all_columns, nevs=nevs)
+    rng = (-base_conf.tail_bound, base_conf.tail_bound)
+    datadataset = ParquetDataset(files=train_file, columns=all_columns, nevs=nevs, scaler=scaler, rng=rng)
     datadataset.dump_scaler(f"{outputpath_base_str}/{sample}_{calo}_train_scaler.save")
 
-    valdataset = ParquetDataset(files=val_file, columns=all_columns, nevs=nevs)
+    valdataset = ParquetDataset(files=val_file, columns=all_columns, nevs=nevs, scaler=scaler, rng=rng)
     valdataset.dump_scaler(f"{outputpath_base_str}/{sample}_{calo}_val_scaler.save")
    
     dataloader = DataLoader(datadataset, batch_size=base_conf.batch_size, shuffle=True)
@@ -351,16 +391,16 @@ def main(cfg):
 
             # dump validation plots only at the end and at the middle of the training
             if (epoch == n_epochs - 1) or (epoch == n_epochs/2):
-                dump_validation_plots(flow, valdataset, columns, condition_columns, 5, device, outputpath_str, epoch)
+                dump_validation_plots(flow, valdataset, columns, condition_columns, 1, device, outputpath_str, epoch, rng=rng)
 
-        # plot losses
-        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
-        ax.plot(train_losses, label="train")
-        ax.plot(val_losses, label="val")
-        ax.set_xlabel("epoch")
-        ax.set_ylabel("loss")
-        ax.legend()
-        fig.savefig(f"{outputpath_str}/losses.png")
+            # plot losses
+            fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+            ax.plot(train_losses, label="train")
+            ax.plot(val_losses, label="val")
+            ax.set_xlabel("epoch")
+            ax.set_ylabel("loss")
+            ax.legend()
+            fig.savefig(f"{outputpath_str}/losses.png")
 
 
 if __name__ == "__main__":
