@@ -1,0 +1,49 @@
+output:
+  save_dir: output
+  name: cfg14g
+general:
+  sample: mc
+  calo: eb
+  condition_columns:
+    - probe_pt
+    - probe_eta
+    - probe_phi
+    - probe_fixedGridRhoAll
+  columns:
+    - probe_r9
+    - probe_s4
+    - probe_sieie
+    - probe_sieip
+  nevents: 100000
+  scaler: normalizer
+base:
+  mc_eb:
+    load_path: None
+    batch_size: 32
+    lr: 0.0001
+    nepochs: 16
+    gclip: 5
+    nstack: 6
+    nblocks: 6
+    nnodes: 64
+    tail_bound: 1.0
+    nbins: 40
+    activation: relu
+    coupling: false
+    coupling_width: 32
+    coupling_depth: 2
+  data_eb:
+    load_path: None
+    batch_size: 32
+    lr: 0.0001
+    nepochs: 26
+    gclip: 5
+    nstack: 6
+    nblocks: 6
+    nnodes: 64
+    tail_bound: 1.0
+    nbins: 40
+    activation: relu
+    coupling: false
+    coupling_width: 32
+    coupling_depth: 2
