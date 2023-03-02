@@ -595,9 +595,11 @@ def main(cfg):
     test_mc.df = test_mc.df.iloc[:min_evs_test]
    
     from copy import deepcopy
-    mc_scaledback_uncorr = deepcopy(test_mc)
-    mc_scaledback_uncorr.scale_back()
-    mc_scaledback_uncorr = mc_scaledback_uncorr.df
+    mc_uncorr = deepcopy(test_mc)
+    mc_uncorr_df = mc_uncorr.df
+    mc_uncorr_scaledback = deepcopy(test_mc)
+    mc_uncorr_scaledback.scale_back()
+    mc_scaledback_uncorr = mc_uncorr_scaledback.df
     
     inputs = torch.tensor(test_mc.df.values[:, ncond:]).to(device)
     context_l = torch.tensor(test_mc.df.values[:, :ncond]).to(device)
@@ -610,7 +612,19 @@ def main(cfg):
     # assign new columns
     for i, col in enumerate(columns):
         test_mc.df[col] = mc_to_data[:, i].cpu().numpy()
-    
+ 
+    print("Plotting histograms not scaled back")
+    for col in columns:
+        fig, ax = plt.subplots()
+        ax.hist(test_mc.df[col], bins=100, density=True, label="MC")
+        ax.hist(mc_uncorr_df[col], bins=100, density=True, label="MC (uncorr)", alpha=0.5)
+        ax.hist(test_dataset.df[col], bins=100, density=True, label="Data", alpha=0.5)
+        ax.legend()
+        ax.set_xlabel(col)
+        ax.set_ylabel("Events/binwidth")
+        fig.savefig(f"{outputpath_str}/hist_unscaled_{col}.png")
+        plt.close(fig)
+   
     # scale back
     print("Scaling back")
     test_mc.scale_back()
