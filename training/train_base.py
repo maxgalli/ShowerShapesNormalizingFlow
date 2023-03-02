@@ -68,11 +68,15 @@ class ParquetDataset(Dataset):
         if nevs is not None:
             self.df = self.df.iloc[:nevs]
 
-        #self.df = self.df[self.df["probe_pt"] < 200]
+        # saturate pt
+        self.df["probe_pt"] = self.df["probe_pt"].clip(upper=200)
         # scale pt
-        self.pt_transformer = FunctionTransformer(np.log1p, validate=True)
-        self.df["probe_pt"] = self.pt_transformer.transform(self.df['probe_pt'].to_numpy().reshape(-1, 1))
-        y = self.df.values
+        self.pt_transformer = FunctionTransformer(np.log1p, inverse_func=np.expm1, validate=True)
+        pt_scaled = self.pt_transformer.transform(self.df['probe_pt'].to_numpy().reshape(-1, 1))
+
+        # scale the rest
+        df_no_pt = self.df.drop(columns=['probe_pt'])
+        y = df_no_pt.values
         if scaler == "minmax":
             self.scaler = MinMaxScaler(rng)
         elif scaler == "standard":
@@ -85,23 +89,33 @@ class ParquetDataset(Dataset):
             self.scaler = PowerTransformer(method='yeo-johnson')
         elif scaler == "qtgaus":
             self.scaler = QuantileTransformer(output_distribution='normal')
-        elif scaler == "normalizer":
-            self.scaler = Normalizer()
         self.scaler.fit(y)
         y_scaled = self.scaler.transform(y)
+        # insert pt back in the correct place
+        pt_index = self.columns.index('probe_pt')
+        y_scaled = np.insert(y_scaled, pt_index, pt_scaled[:, 0], axis=1)
         self.df = pd.DataFrame(y_scaled, columns=self.columns)
+    
+    def saturate(self, df, column, value):
+        df[column] = df[column].clip(upper=value)
+        return df
 
     def dump_scaler(self, path):
         dump(self.scaler, path)
         dump(self.pt_transformer, path.replace(".save", "_pt.save"))
 
     def get_scaled_back_array(self):
-        y_scaled_back = self.scaler.inverse_transform(self.df.values)
         # scale back pt
-        pt_index = self.columns.index("probe_pt")
-        pt_scaled_back = self.pt_transformer.inverse_transform(y_scaled_back[:, pt_index].reshape(-1, 1))
-        y_scaled_back[:, pt_index] = pt_scaled_back
-        return y_scaled_back
+        pt_scaled = self.df['probe_pt'].to_numpy().reshape(-1, 1)
+        pt = self.pt_transformer.inverse_transform(pt_scaled)
+        # scale back the rest
+        df_no_pt = self.df.drop(columns=['probe_pt'])
+        y_scaled = df_no_pt.values
+        y = self.scaler.inverse_transform(y_scaled)
+        # insert pt back in the correct place
+        pt_index = self.columns.index('probe_pt')
+        y = np.insert(y, pt_index, pt[:, 0], axis=1)
+        return y
 
     def scale_back(self):
         y_scaled = self.get_scaled_back_array()
