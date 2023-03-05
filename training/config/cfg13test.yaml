@@ -1,6 +1,6 @@
 output:
   save_dir: output
-  name: cfg_test
+  name: cfg13test
 general:
   sample: mc
   calo: eb
@@ -15,19 +15,19 @@ general:
     - probe_sieie
     - probe_sieip
   nevents: 100
-  scaler: standard
+  scaler: minmax
 base:
   mc_eb:
     load_path: None
     batch_size: 32
     lr: 0.0001
-    nepochs: 64
+    nepochs: 16
     gclip: 5
     nstack: 6
     nblocks: 6
     nnodes: 64
     tail_bound: 5.0
-    nbins: 64
+    nbins: 40
     activation: relu
     coupling: false
     coupling_width: 32
@@ -36,30 +36,30 @@ base:
     load_path: None
     batch_size: 32
     lr: 0.0001
-    nepochs: 64
+    nepochs: 26
     gclip: 5
     nstack: 6
     nblocks: 6
     nnodes: 64
     tail_bound: 5.0
-    nbins: 64
+    nbins: 40
     activation: relu
     coupling: false
     coupling_width: 32
     coupling_depth: 2
 top_transformer_eb:
   load_path: None
-  load_path_data: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg15/data_eb/epoch_50_valloss_3.436.pt
-  load_path_mc: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg15/mc_eb/epoch_16_valloss_3.750.pt
+  load_path_data: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg13/data_eb/epoch_2_valloss_8.389.pt
+  load_path_mc: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg13/mc_eb/epoch_2_valloss_6.280.pt
   batch_size: 128
   lr: 0.0001
-  nepochs: 10
-  flow4flow: customcontext
+  nepochs: 4
+  flow4flow: FFFCustom
   direction: alternate
   iteration_steps: 5
   gclip: 5
   nstack: 4
-  nblocks: 10
+  nblocks: 6
   nnodes: 64
   tail_bound: 5.0
   nbins: 40

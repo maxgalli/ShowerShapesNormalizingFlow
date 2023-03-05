@@ -11,6 +11,7 @@ from time import time
 import pickle
 import dask.dataframe as dd
 from dask.distributed import LocalCluster, Client
+from sklearn.model_selection import train_test_split
 
 hep.style.use("CMS")
 
@@ -48,13 +49,11 @@ def main():
         # common cuts
         df = df[df.probe_r9 < 1.2]
 
-        # shuffle and separate in train, val, test
-        nevs = 1000000 if len(df) > 1000000 else int(0.6*len(df))
-        df = df.sample(frac=1).reset_index(drop=True)
-        df_train_val = df[:nevs]
-        df_test = df[nevs:]
-        df_train = df_train_val[:int(0.8*nevs)]
-        df_val = df_train_val[int(0.8*nevs):]
+        df_train, df_test = train_test_split(df, test_size=0.4, random_state=42)
+        df_val, df_test = train_test_split(df_test, test_size=0.6, random_state=42)
+        print(f"Train {name}: {len(df_train)}")
+        print(f"Val {name}: {len(df_val)}")
+        print(f"Test {name}: {len(df_test)}")
 
         # save
         for ext, df_ in zip(["train", "val", "test"], [df_train, df_val, df_test]):

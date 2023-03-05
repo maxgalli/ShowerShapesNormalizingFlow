@@ -47,3 +47,26 @@ base:
     coupling: false
     coupling_width: 32
     coupling_depth: 2
+top_transformer_eb:
+  load_path: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg14b/top_eb/epoch_10_valloss_3.782.pt
+  load_path_data: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg14b/data_eb/epoch_24_valloss_3.443.pt
+  load_path_mc: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg14b/mc_eb/epoch_15_valloss_3.755.pt
+  batch_size: 128
+  lr: 0.0001
+  nepochs: 10
+  flow4flow: customcontext
+  direction: alternate
+  iteration_steps: 5
+  gclip: 5
+  nstack: 4
+  nblocks: 6
+  nnodes: 64
+  tail_bound: 10.0
+  nbins: 128
+  activation: relu
+  coupling: false
+  coupling_width: 32
+  coupling_depth: 2
+  penalty: l1
+  penalty_weight: 1
+  anneal: 0

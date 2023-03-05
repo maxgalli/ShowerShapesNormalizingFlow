@@ -1,6 +1,6 @@
 output:
   save_dir: output
-  name: cfg14c
+  name: cfg19
 general:
   sample: mc
   calo: eb
@@ -14,35 +14,35 @@ general:
     - probe_s4
     - probe_sieie
     - probe_sieip
-  nevents: 100000
-  scaler: maxabs
+  nevents: 800000
+  scaler: qtgaus
 base:
   mc_eb:
     load_path: None
-    batch_size: 32
+    batch_size: 512
     lr: 0.0001
-    nepochs: 16
+    nepochs: 100
     gclip: 5
     nstack: 6
     nblocks: 6
     nnodes: 64
-    tail_bound: 1.0
-    nbins: 40
+    tail_bound: 5.0
+    nbins: 128
     activation: relu
     coupling: false
     coupling_width: 32
     coupling_depth: 2
   data_eb:
     load_path: None
-    batch_size: 32
+    batch_size: 512
     lr: 0.0001
-    nepochs: 16
+    nepochs: 100
     gclip: 5
     nstack: 6
     nblocks: 6
     nnodes: 64
-    tail_bound: 1.0
-    nbins: 40
+    tail_bound: 5.0
+    nbins: 128
     activation: relu
     coupling: false
     coupling_width: 32

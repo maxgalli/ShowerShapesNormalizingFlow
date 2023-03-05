@@ -70,7 +70,7 @@ def main(cfg):
     datadataset.dump_scaler(f"{outputpath_base_str}/{sample}_{calo}_train_scaler.save")
 
     valdataset = ParquetDataset(
-        files=val_file, columns=all_columns, nevs=nevs, scaler=scaler, rng=rng
+        files=val_file, columns=all_columns, nevs=90000, scaler=scaler, rng=rng
     )
     valdataset.dump_scaler(f"{outputpath_base_str}/{sample}_{calo}_val_scaler.save")
 

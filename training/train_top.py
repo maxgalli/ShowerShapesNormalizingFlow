@@ -115,13 +115,13 @@ def main(cfg):
         files=data_train_file, columns=all_columns, scaler=scaler, nevs=nevs
     )
     val_dataset = ParquetDataset(
-        files=data_val_file, columns=all_columns, scaler=scaler, nevs=nevs
+        files=data_val_file, columns=all_columns, scaler=scaler, nevs=80000
     )
     mc_dataset = ParquetDataset(
         files=mc_train_file, columns=all_columns, scaler=scaler, nevs=nevs
     )
     mc_val_dataset = ParquetDataset(
-        files=mc_val_file, columns=all_columns, scaler=scaler, nevs=nevs
+        files=mc_val_file, columns=all_columns, scaler=scaler, nevs=80000
     )
     # make sure we have the same number of events in data and mc
     min_evs_train = min(len(d_dataset), len(mc_dataset))
@@ -132,16 +132,16 @@ def main(cfg):
     mc_val_dataset.df = mc_val_dataset.df.iloc[:min_evs_val]
 
     dataloader = DataLoader(
-        d_dataset, batch_size=cfg.base[f"data_{calo}"].batch_size, shuffle=True
+        d_dataset, batch_size=top_transformer.batch_size, shuffle=True
     )
     val_dataloader = DataLoader(
-        val_dataset, batch_size=cfg.base[f"data_{calo}"].batch_size, shuffle=True
+        val_dataset, batch_size=top_transformer.batch_size, shuffle=True
     )
     mcloader = DataLoader(
-        mc_dataset, batch_size=cfg.base[f"mc_{calo}"].batch_size, shuffle=True
+        mc_dataset, batch_size=top_transformer.batch_size, shuffle=True
     )
     val_mcloader = DataLoader(
-        mc_val_dataset, batch_size=cfg.base[f"mc_{calo}"].batch_size, shuffle=True
+        mc_val_dataset, batch_size=top_transformer.batch_size, shuffle=True
     )
     # print(len(d_dataset), len(mc_dataset), len(val_dataset), len(mc_val_dataset))
 
