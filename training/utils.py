@@ -28,6 +28,7 @@ from ffflows import distance_penalties
 from ffflows.distance_penalties import AnnealedPenalty
 from ffflows.distance_penalties import BasePenalty
 from torch.nn.utils import clip_grad_norm_
+from copy import deepcopy
 
 
 class ParquetDataset(Dataset):
@@ -43,6 +44,15 @@ class ParquetDataset(Dataset):
 
         # saturate pt
         self.df["probe_pt"] = self.df["probe_pt"].clip(upper=200)
+        if "probe_sieie" in self.columns:
+            self.df["probe_sieie"] = self.df["probe_sieie"].clip(upper=0.012, lower=0.005)
+        if "probe_sieip" in self.columns:
+            self.df["probe_sieip"] = self.df["probe_sieip"].clip(upper=0.0001, lower=-0.0001)
+        if "probe_etaWidth" in self.columns:
+            self.df["probe_etaWidth"] = self.df["probe_etaWidth"].clip(upper=0.025)
+        if "probe_phiWidth" in self.columns:
+            self.df["probe_phiWidth"] = self.df["probe_phiWidth"].clip(upper=0.125)
+        
         # scale pt
         self.pt_transformer = FunctionTransformer(
             np.log1p, inverse_func=np.expm1, validate=True
@@ -50,10 +60,10 @@ class ParquetDataset(Dataset):
         pt_scaled = self.pt_transformer.transform(
             self.df["probe_pt"].to_numpy().reshape(-1, 1)
         )
+        self.df["probe_pt"] = pt_scaled
 
         # scale the rest
-        df_no_pt = self.df.drop(columns=["probe_pt"])
-        y = df_no_pt.values
+        y = self.df.values
         if scaler == "minmax":
             self.scaler = MinMaxScaler(rng)
         elif scaler == "standard":
@@ -68,30 +78,19 @@ class ParquetDataset(Dataset):
             self.scaler = QuantileTransformer(output_distribution="normal")
         self.scaler.fit(y)
         y_scaled = self.scaler.transform(y)
-        # insert pt back in the correct place
-        pt_index = self.columns.index("probe_pt")
-        y_scaled = np.insert(y_scaled, pt_index, pt_scaled[:, 0], axis=1)
         self.df = pd.DataFrame(y_scaled, columns=self.columns)
-
-    def saturate(self, df, column, value):
-        df[column] = df[column].clip(upper=value)
-        return df
 
     def dump_scaler(self, path):
         dump(self.scaler, path)
         dump(self.pt_transformer, path.replace(".save", "_pt.save"))
 
     def get_scaled_back_array(self):
-        # scale back pt
-        pt_scaled = self.df["probe_pt"].to_numpy().reshape(-1, 1)
-        pt = self.pt_transformer.inverse_transform(pt_scaled)
-        # scale back the rest
-        df_no_pt = self.df.drop(columns=["probe_pt"])
-        y_scaled = df_no_pt.values
+        y_scaled = self.df.values
         y = self.scaler.inverse_transform(y_scaled)
-        # insert pt back in the correct place
-        pt_index = self.columns.index("probe_pt")
-        y = np.insert(y, pt_index, pt[:, 0], axis=1)
+        # scale back pt
+        pt_partially_scaled = y[:, self.columns.index("probe_pt")].reshape(-1, 1)
+        pt_scaled_back = self.pt_transformer.inverse_transform(pt_partially_scaled)
+        y[:, self.columns.index("probe_pt")] = pt_scaled_back.reshape(-1)
         return y
 
     def scale_back(self):
@@ -193,6 +192,16 @@ def dump_validation_plots(
     with torch.no_grad():
         sample = flow.sample(nsample, context=xcond)
     pairs = [p for p in itertools.combinations(columns, 2)]
+    # 1D plots
+    for c in columns:
+        fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+        ax.hist(valdataset.df[c], bins=100, range=rng, density=True, histtype="step", label="Data")
+        sub_sample = sample[:, :, columns.index(c)]
+        x = sub_sample.reshape(sub_sample.shape[0] * sub_sample.shape[1])
+        ax.hist(x.cpu().numpy(), bins=100, range=rng, density=True, histtype="step", label="Sampled")
+        fig.savefig(f"{path}/epoch_{epoch}_{c}_1D.png")
+        if writer is not None:
+            writer.add_figure(f"epoch_{epoch}_{c}_1D", fig, epoch)
     for pair in pairs:
         c1, c2 = pair
         print(f"Plotting {pair}")
@@ -340,6 +349,9 @@ class FFFCustom(flows.Flow):
     def transform(self, inputs, input_context, target_context=None, inverse=False):
         context = self._embedding_net(input_context)
         transform = self._transform.inverse if inverse else self._transform
+        # convert to float32
+        inputs = inputs.float()
+        context = context.float()
         y, logabsdet = transform(inputs, context)
 
         return y, logabsdet
@@ -511,10 +523,21 @@ def dump_validation_plots_top(
         
         # and 1D histograms
         fig, ax = plt.subplots(1, 1, figsize=(10, 5))
-        ax.hist(data_val.dataset.df[column], bins=100, range=rng, histtype='step', label='valdata', density=True)
-        ax.hist(mc_to_data[:, columns.index(column)].cpu().numpy(), bins=100, range=rng, histtype='step', label='sample', density=True)
+        # scale back 
+        scaled_back_arr_data = data_val.dataset.get_scaled_back_array() 
+        scaled_back_df_data = pd.DataFrame(scaled_back_arr_data, columns=data_val.dataset.df.columns)
+        scaled_back_arr_mc = mc_val.dataset.get_scaled_back_array()
+        scaled_back_df_mc = pd.DataFrame(scaled_back_arr_mc, columns=mc_val.dataset.df.columns)
+        copied_mc_val = deepcopy(mc_val)
+        for col in columns:
+            copied_mc_val.dataset.df[col] = mc_to_data[:, columns.index(col)].cpu().numpy()
+        copied_mc_val.dataset.scale_back()
+        ax.hist(scaled_back_df_data[column], bins=100, histtype='step', label='valdata', density=True)
+        ax.hist(copied_mc_val.dataset.df[column], bins=100, histtype='step', label='valmc', density=True)
+        ax.hist(scaled_back_df_mc[column], bins=100, histtype='step', label='mc UNCORR', density=True)
         ax.set_xlabel(column)
         ax.set_ylabel('density')
+        ax.legend()
         fig.savefig(f"{path}/epoch_{epoch + 1}_{column}_1D.png")
         if writer is not None:
             writer.add_figure(f"epoch_{column}_1D", fig, epoch + 1)
