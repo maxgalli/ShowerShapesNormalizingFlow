@@ -10,7 +10,7 @@
 #SBATCH --ntasks=10                      # request 10 CPU's (t3gpu01/02: balance between CPU and GPU : 5CPU/1GPU)      
 #SBATCH --gres=gpu:2                     # request  for two GPU's on machine, this is total  amount of GPUs for job        
 #SBATCH --mem=20G                        # memory (per job)
-#SBATCH --time=15:00:00
+#SBATCH --time=30:00:00
 #SBATCH --gres-flags=disable-binding    
 
-/work/gallim/mambaforge/envs/FFF-minimal/bin/python /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/train_base.py --config-name {param1} general.sample={param2} general.calo={param3}
+export CUDA_VISIBLE_DEVICES=2,3,4,5,6,7; /work/gallim/mambaforge/envs/FFF-minimal/bin/python /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/train_base.py --config-name {param1} general.sample={param2} general.calo={param3}

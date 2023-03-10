@@ -31,8 +31,190 @@ from torch.nn.utils import clip_grad_norm_
 from copy import deepcopy
 
 
+def saturate_df(df):
+    df["probe_pt"] = df["probe_pt"].clip(upper=200)
+    if "probe_sieie" in df.columns:
+        df["probe_sieie"] = df["probe_sieie"].clip(upper=0.012, lower=0.005)
+    if "probe_sieip" in df.columns:
+        df["probe_sieip"] = df["probe_sieip"].clip(upper=0.0001, lower=-0.0001)
+    if "probe_etaWidth" in df.columns:
+        df["probe_etaWidth"] = df["probe_etaWidth"].clip(upper=0.025)
+    if "probe_phiWidth" in df.columns:
+        df["probe_phiWidth"] = df["probe_phiWidth"].clip(upper=0.125)
+    return df
+
+
+def scale_pt(pt_array):
+    pt_transformer = FunctionTransformer(np.log1p, inverse_func=np.expm1, validate=True)
+    pt_scaled = pt_transformer.transform(pt_array.reshape(-1, 1))
+    return pt_scaled, pt_transformer
+
+
+def standard_scaling(df, saturate=True, **kwargs):
+    # saturate
+    if saturate:
+        df = saturate_df(df)
+
+    # scale pt
+    pt = df["probe_pt"].values
+    df["probe_pt"], pt_transformer = scale_pt(pt)
+
+    # standard scaling
+    y = df.values
+    scaler = StandardScaler()
+    scaler.fit(y)
+    y_scaled = scaler.transform(y)
+    df = pd.DataFrame(y_scaled, columns=df.columns)
+
+    scalers = {
+        "scaler": scaler,
+        "pt_transformer": pt_transformer,
+    }
+
+    return df, scalers
+
+
+def qtgaus_scaling(df, saturate=True, **kwargs):
+    # saturate
+    if saturate:
+        df = saturate_df(df)
+
+    # scale pt
+    pt = df["probe_pt"].values
+    df["probe_pt"], pt_transformer = scale_pt(pt)
+
+    # qtgaus scaling
+    y = df.values
+    scaler = QuantileTransformer(
+        output_distribution="normal", n_quantiles=1000, random_state=0
+    )
+    scaler.fit(y)
+    y_scaled = scaler.transform(y)
+    df = pd.DataFrame(y_scaled, columns=df.columns)
+
+    scalers = {
+        "scaler": scaler,
+        "pt_transformer": pt_transformer,
+    }
+
+    return df, scalers
+
+
+def standard_scaling_inv(df, scalers):
+    # standard scaling
+    y = df.values
+    scaler = scalers["scaler"]
+    y_scaled = scaler.inverse_transform(y)
+    df = pd.DataFrame(y_scaled, columns=df.columns)
+
+    # unscale pt
+    pt_transformer = scalers["pt_transformer"]
+    pt_scaled = df["probe_pt"].values
+    df["probe_pt"] = pt_transformer.inverse_transform(pt_scaled.reshape(-1, 1))
+
+    return df
+
+
+def custom_scaling_1(df, saturate=True, **kwargs):
+    # saturate
+    if saturate:
+        df = saturate_df(df)
+
+    # scale pt
+    pt = df["probe_pt"].values
+    df["probe_pt"], pt_transformer = scale_pt(pt)
+
+    scaler_one_columns = [
+        "probe_pt",
+        "probe_eta",
+        "probe_phi",
+        "probe_fixedGridRhoAll",
+        "probe_r9",
+        "probe_s4",
+    ]
+    scaler_two_columns = [
+        "probe_sieie",
+        "probe_sieip",
+        "probe_etaWidth",
+        "probe_phiWidth",
+    ]
+    y_one = df[scaler_one_columns].values
+    y_two = df[scaler_two_columns].values
+    scaler_one = StandardScaler()
+    scaler_two = QuantileTransformer(output_distribution="normal")
+    scaler_one.fit(y_one)
+    scaler_two.fit(y_two)
+    y_one_scaled = scaler_one.transform(y_one)
+    y_two_scaled = scaler_two.transform(y_two)
+
+    df[scaler_one_columns] = pd.DataFrame(y_one_scaled, columns=scaler_one_columns)
+    df[scaler_two_columns] = pd.DataFrame(y_two_scaled, columns=scaler_two_columns)
+
+    scalers = {
+        "scaler_one": scaler_one,
+        "scaler_two": scaler_two,
+        "pt_transformer": pt_transformer,
+    }
+
+    return df, scalers
+
+
+def custom_scaling_1_inv(df, scalers):
+    scaler_one_columns = [
+        "probe_pt",
+        "probe_eta",
+        "probe_phi",
+        "probe_fixedGridRhoAll",
+        "probe_r9",
+        "probe_s4",
+    ]
+    scaler_two_columns = [
+        "probe_sieie",
+        "probe_sieip",
+        "probe_etaWidth",
+        "probe_phiWidth",
+    ]
+
+    y_one = df[scaler_one_columns].values
+    scaler_one = scalers["scaler_one"]
+    y_one_scaled = scaler_one.inverse_transform(y_one)
+    y_two = df[scaler_two_columns].values
+    scaler_two = scalers["scaler_two"]
+    y_two_scaled = scaler_two.inverse_transform(y_two)
+    df[scaler_one_columns] = pd.DataFrame(y_one_scaled, columns=scaler_one_columns)
+    df[scaler_two_columns] = pd.DataFrame(y_two_scaled, columns=scaler_two_columns)
+
+    # unscale pt
+    pt_transformer = scalers["pt_transformer"]
+    pt_scaled = df["probe_pt"].values
+    df["probe_pt"] = pt_transformer.inverse_transform(pt_scaled.reshape(-1, 1))
+
+    return df
+
+
+scaling_functions = {
+    "standard_scaling": standard_scaling,
+    "qtgaus_scaling": qtgaus_scaling,
+    "custom_scaling_1": custom_scaling_1,
+}
+scaling_functions_inv = {
+    "standard_scaling_inv": standard_scaling_inv,
+    "qtgaus_scaling_inv": standard_scaling_inv,
+    "custom_scaling_1_inv": custom_scaling_1_inv,
+}
+
+
 class ParquetDataset(Dataset):
-    def __init__(self, files, columns, nevs=None, scaler="minmax", rng=(-5, 5)):
+    def __init__(
+        self,
+        files,
+        columns,
+        nevs=None,
+        scale_function="standard_scaling",
+        inverse_scale_function="standard_scaling_inv",
+        rng=(-5, 5),
+        saturate=True,
+    ):
         self.columns = columns
         # self.df = dd.read_parquet(files, columns=columns, engine='fastparquet')
         self.df = dd.read_parquet(
@@ -42,61 +224,17 @@ class ParquetDataset(Dataset):
         if nevs is not None:
             self.df = self.df.iloc[:nevs]
 
-        # saturate pt
-        self.df["probe_pt"] = self.df["probe_pt"].clip(upper=200)
-        if "probe_sieie" in self.columns:
-            self.df["probe_sieie"] = self.df["probe_sieie"].clip(upper=0.012, lower=0.005)
-        if "probe_sieip" in self.columns:
-            self.df["probe_sieip"] = self.df["probe_sieip"].clip(upper=0.0001, lower=-0.0001)
-        if "probe_etaWidth" in self.columns:
-            self.df["probe_etaWidth"] = self.df["probe_etaWidth"].clip(upper=0.025)
-        if "probe_phiWidth" in self.columns:
-            self.df["probe_phiWidth"] = self.df["probe_phiWidth"].clip(upper=0.125)
-        
-        # scale pt
-        self.pt_transformer = FunctionTransformer(
-            np.log1p, inverse_func=np.expm1, validate=True
-        )
-        pt_scaled = self.pt_transformer.transform(
-            self.df["probe_pt"].to_numpy().reshape(-1, 1)
-        )
-        self.df["probe_pt"] = pt_scaled
+        self.scaling_function = scaling_functions[scale_function]
+        self.inverse_scale_function = scaling_functions_inv[inverse_scale_function]
 
-        # scale the rest
-        y = self.df.values
-        if scaler == "minmax":
-            self.scaler = MinMaxScaler(rng)
-        elif scaler == "standard":
-            self.scaler = StandardScaler()
-        elif scaler == "maxabs":
-            self.scaler = MaxAbsScaler()
-        elif scaler == "robust":
-            self.scaler = RobustScaler()
-        elif scaler == "poweryeo":
-            self.scaler = PowerTransformer(method="yeo-johnson")
-        elif scaler == "qtgaus":
-            self.scaler = QuantileTransformer(output_distribution="normal")
-        self.scaler.fit(y)
-        y_scaled = self.scaler.transform(y)
-        self.df = pd.DataFrame(y_scaled, columns=self.columns)
+        self.df, self.scalers = self.scaling_function(self.df, saturate=saturate)
 
-    def dump_scaler(self, path):
-        dump(self.scaler, path)
-        dump(self.pt_transformer, path.replace(".save", "_pt.save"))
-
-    def get_scaled_back_array(self):
-        y_scaled = self.df.values
-        y = self.scaler.inverse_transform(y_scaled)
-        # scale back pt
-        pt_partially_scaled = y[:, self.columns.index("probe_pt")].reshape(-1, 1)
-        pt_scaled_back = self.pt_transformer.inverse_transform(pt_partially_scaled)
-        y[:, self.columns.index("probe_pt")] = pt_scaled_back.reshape(-1)
-        return y
+    def get_scaled_back_df(self):
+        df = self.inverse_scale_function(self.df, self.scalers)
+        return df
 
     def scale_back(self):
-        y_scaled = self.get_scaled_back_array()
-        for i, col in enumerate(self.columns):
-            self.df[col] = y_scaled[:, i]
+        self.df = self.inverse_scale_function(self.df, self.scalers)
 
     def __len__(self):
         return len(self.df)
@@ -144,6 +282,7 @@ def spline_inn(
     lu=0,
     num_bins=10,
     context_features=None,
+    dropout_probability=0.0,
     flow_for_flow=False,
 ):
     transform_list = []
@@ -157,6 +296,7 @@ def spline_inn(
                 num_bins=num_bins,
                 tails=tails,
                 activation=activation,
+                dropout_probability=dropout_probability,
                 context_features=context_features,
             )
         ]
@@ -171,6 +311,37 @@ def spline_inn(
         transform_list = transform_list[:-1]
 
     return transforms.CompositeTransform(transform_list)
+
+def divide_dist(distribution, bins):
+    sorted_dist = np.sort(distribution)
+    subgroup_size = len(distribution) // bins
+    edges = [sorted_dist[0]]
+    for i in range(subgroup_size, len(sorted_dist), subgroup_size):
+        edges.append(sorted_dist[i])
+    edges[-1] = sorted_dist[-1]
+    return edges
+
+def dump_profile_plot(
+    ax, ss_name, cond_name, sample_name, ss_arr, cond_arr, color, cond_edges
+):
+    df = pd.DataFrame({ss_name: ss_arr, cond_name: cond_arr})
+    quantiles = [0.25, 0.5, 0.75]
+    qlists = [[], [], []]
+    centers = []
+    for left_edge, right_edge in zip(cond_edges[:-1], cond_edges[1:]):
+        dff = df[(df[cond_name] > left_edge) & (df[cond_name] < right_edge)]
+        qlist = np.quantile(dff[ss_name], quantiles)
+        for i, q in enumerate(qlist):
+            qlists[i].append(q)
+        centers.append((left_edge + right_edge) / 2)
+    mid_index = len(quantiles) // 2
+    for qlist in qlists[:mid_index]:
+        ax.plot(centers, qlist, color=color, linestyle="dashed")
+    for qlist in qlists[mid_index:]:
+        ax.plot(centers, qlist, color=color, linestyle="dashed")
+    ax.plot(centers, qlists[mid_index], color=color, label=sample_name)
+
+    return ax
 
 
 def dump_validation_plots(
@@ -191,133 +362,63 @@ def dump_validation_plots(
     xcond = torch.tensor(valdataset.df.values[:, :ncond].astype(np.float32)).to(device)
     with torch.no_grad():
         sample = flow.sample(nsample, context=xcond)
-    pairs = [p for p in itertools.combinations(columns, 2)]
     # 1D plots
     for c in columns:
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-        ax.hist(valdataset.df[c], bins=100, range=rng, density=True, histtype="step", label="Data")
+        print(f"Dumping {c} 1D plot")
+        ax.hist(
+            valdataset.df[c],
+            bins=100,
+            range=rng,
+            density=True,
+            histtype="step",
+            label="Data",
+        )
         sub_sample = sample[:, :, columns.index(c)]
         x = sub_sample.reshape(sub_sample.shape[0] * sub_sample.shape[1])
-        ax.hist(x.cpu().numpy(), bins=100, range=rng, density=True, histtype="step", label="Sampled")
+        ax.hist(
+            x.cpu().numpy(),
+            bins=100,
+            range=rng,
+            density=True,
+            histtype="step",
+            label="Sampled",
+        )
+        ax.legend()
         fig.savefig(f"{path}/epoch_{epoch}_{c}_1D.png")
         if writer is not None:
-            writer.add_figure(f"epoch_{epoch}_{c}_1D", fig, epoch)
-    for pair in pairs:
-        c1, c2 = pair
-        print(f"Plotting {pair}")
-        fig, axs = plt.subplots(1, 2, figsize=(10, 5))
-        axs[0].hist2d(
-            valdataset.df[c1],
-            valdataset.df[c2],
-            bins=100,
-            range=[rng, rng],
-            norm=matplotlib.colors.LogNorm(),
-        )
-        axs[0].set_xlabel(c1)
-        axs[0].set_ylabel(c2)
-        axs[0].set_title("Validation data")
+            writer.add_figure(f"epoch_{c}_1D", fig, epoch)
 
-        # print(sample.shape)
-        # print(columns.index(c1), columns.index(c2))
-        # keep only the appropriate columns
-        sub_sample = sample[:, :, [columns.index(c1), columns.index(c2)]]
-        # print(sample.shape)
-        x = sub_sample.reshape(
-            sub_sample.shape[0] * sub_sample.shape[1], sub_sample.shape[2]
-        )
-        # print(x.shape)
-        # plt.hist2d(x[:, 0].numpy(), x[:, 1].numpy(), bins=100, range=[[-0.5, 1.5], [-0.2 ,1.2]], norm=matplotlib.colors.LogNorm())
-        axs[1].hist2d(
-            x[:, 0].cpu().numpy(),
-            x[:, 1].cpu().numpy(),
-            bins=100,
-            range=[rng, rng],
-            norm=matplotlib.colors.LogNorm(),
-        )
-        axs[1].set_xlabel(c1)
-        axs[1].set_ylabel(c2)
-        axs[1].set_title("Sampled data")
-        fig.savefig(f"{path}/epoch_{epoch}_{c1}-{c2}.png")
-        if writer is not None:
-            writer.add_figure(f"epoch_{c1}-{c2}", fig, epoch)
-
-    # now plot in bins of the condition columns
-    nbins = 4
+    # now plot profiles
+    nbins = 8
     for column in columns:
-        fig, ax = plt.subplots(len(condition_columns), 2, figsize=(10, 5 * nbins))
-        for row, cond_column in enumerate(condition_columns):
-            # divide into 4 bins
-            bins = np.linspace(
-                valdataset.df[cond_column].min(),
-                valdataset.df[cond_column].max(),
-                nbins + 1,
-            )
+        for cond_column in condition_columns:
+            fig, ax = plt.subplots(1, 1, figsize=(5, 5))
             cond_arr = valdataset.df[cond_column].values
-            cond_arr_rep = np.repeat(cond_arr, nsample)
-            for left_edge, right_edge in zip(bins[:-1], bins[1:]):
-                left_edge_label = f"{left_edge:.2f}"
-                right_edge_label = f"{right_edge:.2f}"
-                print(
-                    f"Plotting {column} in bin {left_edge_label} to {right_edge_label} of {cond_column}"
+            data_arr = valdataset.df[column].values
+            sub_sample = sample[:, :, columns.index(column)]
+            x = sub_sample.reshape(sub_sample.shape[0] * sub_sample.shape[1])
+            cond_edges = divide_dist(cond_arr, nbins)
+            for name, arr, color in [
+                ("Data", data_arr, "blue"),
+                ("Sampled", x.cpu().numpy(), "red"),
+            ]:
+                ax = dump_profile_plot(
+                    ax=ax,
+                    ss_name=column,
+                    cond_name=cond_column,
+                    sample_name=name,
+                    ss_arr=arr,
+                    cond_arr=cond_arr,
+                    color=color,
+                    cond_edges=cond_edges,
                 )
-                # plot valdata
-                arr = valdataset.df[
-                    (valdataset.df[cond_column] > left_edge)
-                    & (valdataset.df[cond_column] < right_edge)
-                ]
-                ax[row, 0].hist2d(
-                    arr[cond_column],
-                    arr[column],
-                    bins=100,
-                    range=[rng, rng],
-                    norm=matplotlib.colors.LogNorm(),
-                )
-                ax[row, 0].set_xlabel(cond_column)
-                ax[row, 0].set_ylabel(column)
-                ax[row, 0].set_title(
-                    f"{column} in bin {left_edge_label} to {right_edge_label} of {cond_column}"
-                )
-
-                # plot sample
-                sub_sample = sample[:, :, columns.index(column)]
-                x = sub_sample.reshape(sub_sample.shape[0] * sub_sample.shape[1])
-                # concatenate cond_arr_rep and x and keep only values in bin
-                arr = np.concatenate(
-                    (cond_arr_rep.reshape(-1, 1), x.cpu().numpy().reshape(-1, 1)),
-                    axis=1,
-                )
-                arr = arr[(arr[:, 0] > left_edge) & (arr[:, 0] < right_edge)]
-                ax[row, 1].hist2d(
-                    arr[:, 0],
-                    arr[:, 1],
-                    bins=100,
-                    range=[rng, rng],
-                    norm=matplotlib.colors.LogNorm(),
-                )
-                ax[row, 1].set_xlabel(cond_column)
-                ax[row, 1].set_ylabel(column)
-                ax[row, 1].set_title(
-                    f"{column} in bin {left_edge_label} to {right_edge_label} of {cond_column}"
-                )
-        fig.savefig(f"{path}/epoch_{epoch}_{column}_condbins.png")
-        if writer is not None:
-            writer.add_figure(f"epoch_{column}_condbins", fig, epoch)
-
-    """
-    if nsample == 1:
-        for column in columns:
-            for cond_column in condition_columns:
-                print(f"Plotting {column} ratio vs {cond_column}")
-                sub_sample = sample[:, :, columns.index(column)]
-                x = sub_sample.reshape(sub_sample.shape[0]*sub_sample.shape[1])
-                r = x.cpu().numpy() / valdataset.df[column].values
-                fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-                ax.hist2d(valdataset.df[cond_column], r, bins=100, range=[None, [-29, 31]], norm=matplotlib.colors.LogNorm())
-                ax.set_xlabel(cond_column)
-                ax.set_ylabel(f"{column} ratio")
-                ax.set_title(f"{column} ratio vs {cond_column}")
-                fig.savefig(f"{path}/epoch_{epoch}_{column}_ratio_vs_{cond_column}.png")
-    """
+            ax.legend()
+            ax.set_xlabel(cond_column)
+            ax.set_ylabel(column)
+            fig.savefig(f"{path}/profiles_epoch_{epoch}_{column}_{cond_column}.png")
+            if writer is not None:
+                writer.add_figure(f"profiles_{column}_{cond_column}", fig, epoch)
 
 
 class FFFCustom(flows.Flow):
@@ -418,7 +519,6 @@ def dump_validation_plots_top(
 ):
     print("Dumping validation plots")
     ncond = len(condition_columns)
-    pairs = [p for p in itertools.combinations(columns, 2)]
 
     inputs = torch.tensor(mc_val.dataset.df.values[:, ncond:]).to(device)
     context_l = torch.tensor(mc_val.dataset.df.values[:, :ncond]).to(device)
@@ -430,117 +530,128 @@ def dump_validation_plots_top(
         )
         # mc_to_data, _ = model.batch_transform(inputs, context_l, target_context=None, inverse=False)
 
-    for pair in pairs:
-        c1, c2 = pair
-        print(f"Plotting {pair}")
-        fig, axs = plt.subplots(1, 2, figsize=(10, 5))
-        axs[0].hist2d(
-            data_val.dataset.df[c1],
-            data_val.dataset.df[c2],
-            bins=100,
-            range=[rng, rng],
-            norm=matplotlib.colors.LogNorm(),
-        )
-        axs[0].set_xlabel(c1)
-        axs[0].set_ylabel(c2)
-        axs[0].set_title("Validation data")
+    # 1D histograms
+    scaled_back_df_data = data_val.dataset.get_scaled_back_df()
+    scaled_back_df_mc = mc_val.dataset.get_scaled_back_df()
 
-        # print("DIOMERDAAAAAA")
-        print(mc_to_data.shape)
-        index_c1 = columns.index(c1)
-        index_c2 = columns.index(c2)
-        axs[1].hist2d(
-            mc_to_data[:, index_c1].cpu().numpy(),
-            mc_to_data[:, index_c2].cpu().numpy(),
-            bins=100,
-            range=[rng, rng],
-            norm=matplotlib.colors.LogNorm(),
-        )
-        axs[1].set_xlabel(c1)
-        axs[1].set_ylabel(c2)
-        axs[1].set_title("MC to data")
-        fig.savefig(f"{path}/epoch_{epoch + 1}_{c1}-{c2}.png")
-        if writer is not None:
-            writer.add_figure(f"epoch_{c1}-{c2}", fig, epoch + 1)
-
-    # now plot in bins of condition columns
-    nbins = 4
-    for column in columns:
-        fig, ax = plt.subplots(len(condition_columns), 2, figsize=(10, 5 * nbins))
-        for row, cond_column in enumerate(condition_columns):
-            bins = np.linspace(
-                data_val.dataset.df[cond_column].min(),
-                data_val.dataset.df[cond_column].max(),
-                nbins + 1,
-            )
-            cond_arr = data_val.dataset.df[cond_column].values
-            for left_edge, right_edge in zip(bins[:-1], bins[1:]):
-                left_edge_label = f"{left_edge:.2f}"
-                right_edge_label = f"{right_edge:.2f}"
-                print(
-                    f"Plotting {column} in bin {left_edge_label} to {right_edge_label} of {cond_column}"
-                )
-                # plot valdata
-                arr = data_val.dataset.df[
-                    (data_val.dataset.df[cond_column] > left_edge)
-                    & (data_val.dataset.df[cond_column] < right_edge)
-                ]
-                ax[row, 0].hist2d(
-                    arr[cond_column],
-                    arr[column],
-                    bins=100,
-                    range=[rng, rng],
-                    norm=matplotlib.colors.LogNorm(),
-                )
-                ax[row, 0].set_xlabel(cond_column)
-                ax[row, 0].set_ylabel(column)
-                ax[row, 0].set_title(
-                    f"{column} in bin {left_edge_label} to {right_edge_label} of {cond_column}"
-                )
-
-                # plot sample
-                x = mc_to_data[:, columns.index(column)]
-                # concatenate cond_arr_rep and x and keep only values in bin
-                arr = np.concatenate(
-                    (cond_arr.reshape(-1, 1), x.cpu().numpy().reshape(-1, 1)), axis=1
-                )
-                arr = arr[(arr[:, 0] > left_edge) & (arr[:, 0] < right_edge)]
-                ax[row, 1].hist2d(
-                    arr[:, 0],
-                    arr[:, 1],
-                    bins=100,
-                    range=[rng, rng],
-                    norm=matplotlib.colors.LogNorm(),
-                )
-                ax[row, 1].set_xlabel(cond_column)
-                ax[row, 1].set_ylabel(column)
-                ax[row, 1].set_title(
-                    f"{column} in bin {left_edge_label} to {right_edge_label} of {cond_column}"
-                )
-        fig.savefig(f"{path}/epoch_{epoch + 1}_{column}_condbins.png")
-        if writer is not None:
-            writer.add_figure(f"epoch_{column}_condbins", fig, epoch + 1)
-        
-        # and 1D histograms
+    for i, column in enumerate(columns):
         fig, ax = plt.subplots(1, 1, figsize=(10, 5))
-        # scale back 
-        scaled_back_arr_data = data_val.dataset.get_scaled_back_array() 
-        scaled_back_df_data = pd.DataFrame(scaled_back_arr_data, columns=data_val.dataset.df.columns)
-        scaled_back_arr_mc = mc_val.dataset.get_scaled_back_array()
-        scaled_back_df_mc = pd.DataFrame(scaled_back_arr_mc, columns=mc_val.dataset.df.columns)
+        ax.hist(
+            data_val.dataset.df[column],
+            bins=100,
+            histtype="step",
+            label="data",
+            density=True,
+            range=rng,
+        )
+        ax.hist(
+            mc_val.dataset.df[column],
+            bins=100,
+            histtype="step",
+            label="mc",
+            density=True,
+            range=rng,
+        )
+        ax.hist(
+            mc_to_data[:, i].cpu().numpy(),
+            bins=100,
+            histtype="step",
+            label="mc to data",
+            density=True,
+            range=rng,
+        )
+        ax.set_label(column)
+        ax.set_ylabel("density")
+        ax.legend()
+        fig.savefig(f"{path}/epoch_{epoch}_{column}_scaled_1D.png")
+        if writer is not None:
+            writer.add_figure(f"scaled_1D_{column}", fig, epoch)
+
+        # scale back
+        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
         copied_mc_val = deepcopy(mc_val)
         for col in columns:
-            copied_mc_val.dataset.df[col] = mc_to_data[:, columns.index(col)].cpu().numpy()
+            copied_mc_val.dataset.df[col] = (
+                mc_to_data[:, columns.index(col)].cpu().numpy()
+            )
         copied_mc_val.dataset.scale_back()
-        ax.hist(scaled_back_df_data[column], bins=100, histtype='step', label='valdata', density=True)
-        ax.hist(copied_mc_val.dataset.df[column], bins=100, histtype='step', label='valmc', density=True)
-        ax.hist(scaled_back_df_mc[column], bins=100, histtype='step', label='mc UNCORR', density=True)
+        # get minimum and maximum as the minimum between the three
+        min_val = min(
+            scaled_back_df_data[column].min(),
+            scaled_back_df_mc[column].min(),
+            copied_mc_val.dataset.df[column].min(),
+        )
+        max_val = max(
+            scaled_back_df_data[column].max(),
+            scaled_back_df_mc[column].max(),
+            copied_mc_val.dataset.df[column].max(),
+        )
+        rng_scaledback = (min_val, max_val)
+        ax.hist(
+            scaled_back_df_data[column],
+            bins=100,
+            histtype="step",
+            label="data",
+            density=True,
+            range=rng_scaledback,
+        )
+        ax.hist(
+            scaled_back_df_mc[column],
+            bins=100,
+            histtype="step",
+            label="mc",
+            density=True,
+            range=rng_scaledback,
+        )
+        ax.hist(
+            copied_mc_val.dataset.df[column],
+            bins=100,
+            histtype="step",
+            label="mc to data",
+            density=True,
+            range=rng_scaledback,
+        )
         ax.set_xlabel(column)
-        ax.set_ylabel('density')
+        ax.set_ylabel("density")
         ax.legend()
-        fig.savefig(f"{path}/epoch_{epoch + 1}_{column}_1D.png")
+        fig.savefig(f"{path}/epoch_{epoch}_{column}_scaledback_1D.png")
         if writer is not None:
-            writer.add_figure(f"epoch_{column}_1D", fig, epoch + 1)
+            writer.add_figure(f"scaledback_1D_{column}", fig, epoch)
+
+    # now plot profiles
+    nbins = 8
+    for column in columns:
+        for cond_column in condition_columns:
+            fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+            data_ss_arr = data_val.dataset.df[column].values
+            data_cond_arr = data_val.dataset.df[cond_column].values
+            mc_uncorr_ss_arr = mc_val.dataset.df[column].values
+            mc_uncorr_cond_arr = mc_val.dataset.df[cond_column].values
+            mc_corr_ss_arr = mc_to_data[:, columns.index(column)].cpu().numpy()
+            mc_corr_cond_arr = mc_val.dataset.df[cond_column].values
+            cond_edges = divide_dist(data_cond_arr, nbins)
+
+            for name, ss_arr, cond_arr, color in [
+                ("data", data_ss_arr, data_cond_arr, "blue"),
+                ("mc", mc_uncorr_ss_arr, mc_uncorr_cond_arr, "red"),
+                ("mc to data", mc_corr_ss_arr, mc_corr_cond_arr, "green"),
+            ]:
+                ax = dump_profile_plot(
+                    ax=ax,
+                    ss_name=column,
+                    cond_name=cond_column,
+                    sample_name=name,
+                    ss_arr=ss_arr,
+                    cond_arr=cond_arr,
+                    color=color,
+                    cond_edges=cond_edges,
+                )
+            ax.legend()
+            ax.set_xlabel(cond_column)
+            ax.set_ylabel(column)
+            fig.savefig(f"{path}/profiles_epoch_{epoch}_{column}_{cond_column}.png")
+            if writer is not None:
+                writer.add_figure(f"profiles_{column}_{cond_column}", fig, epoch)
 
 
 def train_batch_iterate(
@@ -567,7 +678,7 @@ def train_batch_iterate(
     )
     ncond = len(condition_columns)
     model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.001)
     num_steps = len(data_train) * n_epochs
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer=optimizer, T_max=num_steps, last_epoch=-1, eta_min=0
@@ -578,7 +689,8 @@ def train_batch_iterate(
     val_losses = []
     best_vloss = np.inf
     for epoch in range(n_epochs):
-        print(f"Epoch {epoch + 1}/{n_epochs}")
+        epoch += 1
+        print(f"Epoch {epoch}/{n_epochs}")
         tl = []
         tlp = []
         tla = []
@@ -588,21 +700,21 @@ def train_batch_iterate(
         vla = []
         vld = []
         # print how many batches we have
-        print(f"Training batches data: {len(data_train)}")
-        print(f"Validation batches data: {len(data_val)}")
-        print(f"Training batches mc: {len(mc_train)}")
-        print(f"Validation batches mc: {len(mc_val)}")
-        print(len(data_train.dataset.df))
+        # print(f"Training batches data: {len(data_train)}")
+        # print(f"Validation batches data: {len(data_val)}")
+        # print(f"Training batches mc: {len(mc_train)}")
+        # print(f"Validation batches mc: {len(mc_val)}")
+        # print(len(data_train.dataset.df))
         for i, (data, mc) in enumerate(zip(data_train, mc_train)):
             model.train()
             # print(data.shape, mc.shape)
             if i % 2 == 0 + 1 * int(inverse):
-                #print("INVERSE False, from mc to data")
+                # print("INVERSE False, from mc to data")
                 batch = mc.to(device)
                 other_batch = data.to(device)
                 inv = False
             else:
-                #print("INVERSE True, from data to mc")
+                # print("INVERSE True, from data to mc")
                 batch = data.to(device)
                 other_batch = mc.to(device)
                 inv = True
@@ -620,9 +732,9 @@ def train_batch_iterate(
             logprob = -logprob.mean()
             logabsdet = -logabsdet.mean()
             distance = -distance.mean()
-            
+
             loss.backward()
-            
+
             if gclip not in ["None", None]:
                 clip_grad_norm_(model.parameters(), gclip)
             optimizer.step()
@@ -639,9 +751,7 @@ def train_batch_iterate(
         tld_mean = np.mean(tld)
 
         for i, (data, mc) in enumerate(zip(data_val, mc_val)):
-            for inv, (batch, other_batch) in enumerate(
-                list(zip([data, mc], [mc, data]))
-            ):
+            for inv, batch, other_batch in zip([False, True], [data, mc], [mc, data]):
                 batch = batch.to(device)
                 other_batch = other_batch.to(device)
                 inputs = batch[:, ncond:]
@@ -677,7 +787,7 @@ def train_batch_iterate(
                     "train": tloss,
                     "val": vloss,
                 },
-                epoch + 1,
+                epoch,
             )
             writer.add_scalars(
                 "logprob",
@@ -685,7 +795,7 @@ def train_batch_iterate(
                     "train": tlp_mean,
                     "val": vlp_mean,
                 },
-                epoch + 1,
+                epoch,
             )
             writer.add_scalars(
                 "logabsdet",
@@ -693,7 +803,7 @@ def train_batch_iterate(
                     "train": tla_mean,
                     "val": vla_mean,
                 },
-                epoch + 1,
+                epoch,
             )
             writer.add_scalars(
                 "lossdistance",
@@ -701,18 +811,18 @@ def train_batch_iterate(
                     "train": tld_mean,
                     "val": vld_mean,
                 },
-                epoch + 1,
+                epoch,
             )
 
         print(
-            f"Epoch {epoch + 1}/{n_epochs} - Train loss: {tloss:.4f} - Val loss: {vloss:.4f}"
+            f"Epoch {epoch}/{n_epochs} - Train loss: {tloss:.4f} - Val loss: {vloss:.4f}"
         )
         if vloss < best_vloss:
             best_vloss = vloss
             print("Saving model")
             torch.save(
                 model.state_dict(),
-                f"{path}/epoch_{epoch + 1}_valloss_{vloss:.3f}.pt".replace("-", "m"),
+                f"{path}/epoch_{epoch}_valloss_{vloss:.3f}.pt".replace("-", "m"),
             )
         else:
             print(f"Validation did not improve from {best_vloss:.4f} to {vloss:.4f}")
@@ -727,7 +837,7 @@ def train_batch_iterate(
         fig.savefig(f"{path}/losses.png")
 
         # dump validations plots
-        if epoch%2==0:
+        if epoch % 2 == 0:
             dump_validation_plots_top(
                 model,
                 data_val,
@@ -846,7 +956,7 @@ def train_forward(
         fig.savefig(f"{path}/losses.png")
 
         # dump validations plots
-        if (epoch == n_epochs - 1) or (epoch == n_epochs / 2) or (epoch%5 == 0):
+        if (epoch == n_epochs - 1) or (epoch == n_epochs / 2) or (epoch % 5 == 0):
             dump_validation_plots_top(
                 model,
                 data_val,

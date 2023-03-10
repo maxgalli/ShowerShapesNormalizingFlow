@@ -2,7 +2,7 @@
 
 # Define the parameters
 params=(
-  "cfg9 eb"
+  "cfg24 eb"
 )
 
 # Loop over the parameters

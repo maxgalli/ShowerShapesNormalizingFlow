@@ -35,7 +35,8 @@ def main(cfg):
     with open(f"{outputpath_base_str}/{cfg.output.name}.yaml", "w") as file:
         OmegaConf.save(config=cfg, f=file)
     nevs = cfg.general.nevents
-    scaler = cfg.general.scaler
+    scale_func = cfg.general.scale_func
+    scale_func_inv = cfg.general.scale_func_inv
 
     # Set device
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -65,14 +66,22 @@ def main(cfg):
 
     rng = (-base_conf.tail_bound, base_conf.tail_bound)
     datadataset = ParquetDataset(
-        files=train_file, columns=all_columns, nevs=nevs, scaler=scaler, rng=rng
+        files=train_file,
+        columns=all_columns,
+        nevs=nevs,
+        scale_function=scale_func,
+        inverse_scale_function=scale_func_inv,
+        rng=rng,
     )
-    datadataset.dump_scaler(f"{outputpath_base_str}/{sample}_{calo}_train_scaler.save")
 
     valdataset = ParquetDataset(
-        files=val_file, columns=all_columns, nevs=90000, scaler=scaler, rng=rng
+        files=val_file,
+        columns=all_columns,
+        nevs=90000,
+        scale_function=scale_func,
+        inverse_scale_function=scale_func_inv,
+        rng=rng,
     )
-    valdataset.dump_scaler(f"{outputpath_base_str}/{sample}_{calo}_val_scaler.save")
 
     dataloader = DataLoader(datadataset, batch_size=base_conf.batch_size, shuffle=True)
     valdataloader = DataLoader(
@@ -94,6 +103,7 @@ def main(cfg):
             num_stack=base_conf.nstack,
             tail_bound=base_conf.tail_bound,
             activation=getattr(F, base_conf.activation),
+            dropout_probability=base_conf.dropout_probability,
             num_bins=base_conf.nbins,
             context_features=ncond,
         ),
@@ -111,12 +121,13 @@ def main(cfg):
         print(
             f"Training {cfg.output.name} on {device} with {n_epochs} epochs and learning rate {base_conf.lr}."
         )
-        optimizer = optim.Adam(flow.parameters(), lr=base_conf.lr)
+        optimizer = optim.Adam(flow.parameters(), lr=base_conf.lr, weight_decay=1e-5)
         train_losses = []
         val_losses = []
         best_vloss = np.inf
 
         for epoch in range(n_epochs):
+            epoch += 1
             tl = []
             vl = []
             flow.to(device)
@@ -146,15 +157,15 @@ def main(cfg):
             writer.add_scalars(
                 "losses",
                 {"train": epoch_tloss, "val": epoch_vloss},
-                epoch + 1,
+                epoch,
             )
-            print(f"epoch {epoch + 1}: loss = {np.mean(tl)}, val loss = {epoch_vloss}")
+            print(f"epoch {epoch}: loss = {np.mean(tl)}, val loss = {epoch_vloss}")
 
             if epoch_vloss < best_vloss:
                 print("Saving model")
                 torch.save(
                     flow.state_dict(),
-                    f"{outputpath_str}/epoch_{epoch + 1}_valloss_{epoch_vloss:.3f}.pt".replace(
+                    f"{outputpath_str}/epoch_{epoch}_valloss_{epoch_vloss:.3f}.pt".replace(
                         "-", "m"
                     ),
                 )
@@ -165,7 +176,7 @@ def main(cfg):
                 )
 
             # dump validation plots only at the end and at the middle of the training
-            if (epoch == n_epochs - 1) or (epoch == n_epochs / 2) or (epoch%5 == 0):
+            if epoch % 5 == 0:
                 dump_validation_plots(
                     flow,
                     valdataset,

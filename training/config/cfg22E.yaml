@@ -1,6 +1,6 @@
 output:
   save_dir: output
-  name: cfg19
+  name: cfg22E
 general:
   sample: mc
   calo: eb
@@ -14,55 +14,60 @@ general:
     - probe_s4
     - probe_sieie
     - probe_sieip
-  nevents: 800000
-  scaler: qtgaus
+    - probe_etaWidth
+    - probe_phiWidth
+  nevents: 1000000
+  scale_func: qtgaus_scaling
+  scale_func_inv: qtgaus_scaling_inv
 base:
   mc_eb:
     load_path: None
     batch_size: 512
     lr: 0.0001
-    nepochs: 100
+    nepochs: 64
     gclip: 5
     nstack: 6
     nblocks: 6
     nnodes: 64
     tail_bound: 5.0
-    nbins: 128
+    nbins: 64
     activation: relu
+    dropout_probability: 0.1
     coupling: false
-    coupling_width: 32
-    coupling_depth: 2
+    coupling_width: 64
+    coupling_depth: 3
   data_eb:
     load_path: None
     batch_size: 512
     lr: 0.0001
-    nepochs: 100
+    nepochs: 64
     gclip: 5
     nstack: 6
     nblocks: 6
     nnodes: 64
     tail_bound: 5.0
-    nbins: 128
+    nbins: 64
     activation: relu
+    dropout_probability: 0.1
     coupling: false
-    coupling_width: 32
-    coupling_depth: 2
+    coupling_width: 64
+    coupling_depth: 3
 top_transformer_eb:
   load_path: None
-  load_path_data: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg19/data_eb/epoch_45_valloss_4.849.pt
-  load_path_mc: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg19/mc_eb/epoch_40_valloss_4.838.pt
+  load_path_data: None
+  load_path_mc: None
   batch_size: 1024
   lr: 0.0001
-  nepochs: 200
+  nepochs: 100
   flow4flow: FFFCustom
   direction: alternate
-  iteration_steps: 7
+  iteration_steps: 5
   gclip: 5
   nstack: 4
   nblocks: 12
   nnodes: 64
   tail_bound: 5.0
-  nbins: 128
+  nbins: 64
   activation: relu
   coupling: false
   coupling_width: 64

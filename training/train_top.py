@@ -40,7 +40,8 @@ def main(cfg):
     outputpath_base = pathlib.Path(outputpath_base_str)
     outputpath_base.mkdir(parents=True, exist_ok=True)
     nevs = cfg.general.nevents
-    scaler = cfg.general.scaler
+    scale_func = cfg.general.scale_func
+    scale_func_inv = cfg.general.scale_func_inv
 
     # Set device
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -71,6 +72,7 @@ def main(cfg):
             num_stack=cfg.base[label_data].nstack,
             tail_bound=cfg.base[label_data].tail_bound,
             activation=getattr(F, cfg.base[label_data].activation),
+            dropout_probability=cfg.base[label_data].dropout_probability,
             num_bins=cfg.base[label_data].nbins,
             context_features=ncond,
         ),
@@ -87,6 +89,7 @@ def main(cfg):
             num_stack=cfg.base[label_mc].nstack,
             tail_bound=cfg.base[label_mc].tail_bound,
             activation=getattr(F, cfg.base[label_mc].activation),
+            dropout_probability=cfg.base[label_mc].dropout_probability,
             num_bins=cfg.base[label_mc].nbins,
             context_features=ncond,
         ),
@@ -112,16 +115,32 @@ def main(cfg):
 
     # load data
     d_dataset = ParquetDataset(
-        files=data_train_file, columns=all_columns, scaler=scaler, nevs=nevs
+        files=data_train_file,
+        columns=all_columns,
+        nevs=nevs,
+        scale_function=scale_func,
+        inverse_scale_function=scale_func_inv,
     )
     val_dataset = ParquetDataset(
-        files=data_val_file, columns=all_columns, scaler=scaler, nevs=80000
+        files=data_val_file,
+        columns=all_columns,
+        scale_function=scale_func,
+        inverse_scale_function=scale_func_inv,
+        nevs=80000,
     )
     mc_dataset = ParquetDataset(
-        files=mc_train_file, columns=all_columns, scaler=scaler, nevs=nevs
+        files=mc_train_file,
+        columns=all_columns,
+        scale_function=scale_func,
+        inverse_scale_function=scale_func_inv,
+        nevs=nevs,
     )
     mc_val_dataset = ParquetDataset(
-        files=mc_val_file, columns=all_columns, scaler=scaler, nevs=80000
+        files=mc_val_file,
+        columns=all_columns,
+        scale_function=scale_func,
+        inverse_scale_function=scale_func_inv,
+        nevs=80000,
     )
     # make sure we have the same number of events in data and mc
     min_evs_train = min(len(d_dataset), len(mc_dataset))
@@ -130,6 +149,8 @@ def main(cfg):
     mc_dataset.df = mc_dataset.df.iloc[:min_evs_train]
     val_dataset.df = val_dataset.df.iloc[:min_evs_val]
     mc_val_dataset.df = mc_val_dataset.df.iloc[:min_evs_val]
+    print(f"n events train: {min_evs_train}")
+    print(f"n events val: {min_evs_val}")
 
     dataloader = DataLoader(
         d_dataset, batch_size=top_transformer.batch_size, shuffle=True
@@ -155,6 +176,7 @@ def main(cfg):
                 num_stack=top_transformer.nstack,
                 tail_bound=top_transformer.tail_bound,
                 activation=getattr(F, top_transformer.activation),
+                dropout_probability=top_transformer.dropout_probability,
                 num_bins=top_transformer.nbins,
                 context_features=ncond,
                 flow_for_flow=True,
@@ -171,6 +193,7 @@ def main(cfg):
                 num_stack=top_transformer.nstack,
                 tail_bound=top_transformer.tail_bound,
                 activation=getattr(F, top_transformer.activation),
+                dropout_probability=top_transformer.dropout_probability,
                 num_bins=top_transformer.nbins,
                 context_features=ncond,
                 flow_for_flow=True,
@@ -238,12 +261,16 @@ def main(cfg):
     test_dataset = ParquetDataset(
         files=data_test_file,
         columns=all_columns,
-        # scaler=cfg.base[label_data].train_scaler,
+        scale_function=scale_func,
+        inverse_scale_function=scale_func_inv,
+        saturate=False
     )
     test_mc = ParquetDataset(
         files=mc_test_file,
         columns=all_columns,
-        # scaler=cfg.base[label_mc].train_scaler,
+        scale_function=scale_func,
+        inverse_scale_function=scale_func_inv,
+        saturate=False
     )
     # shuffle test datasets
     test_dataset.df = test_dataset.df.sample(frac=1).reset_index(drop=True)
@@ -252,14 +279,7 @@ def main(cfg):
     test_dataset.df = test_dataset.df.iloc[:min_evs_test]
     test_mc.df = test_mc.df.iloc[:min_evs_test]
 
-    from copy import deepcopy
-
-    mc_uncorr = deepcopy(test_mc)
-    mc_uncorr_df = mc_uncorr.df
-    mc_uncorr_scaledback = deepcopy(test_mc)
-    mc_uncorr_scaledback.scale_back()
-    mc_scaledback_uncorr = mc_uncorr_scaledback.df
-
+    f4flow = f4flow.to(device)
     inputs = torch.tensor(test_mc.df.values[:, ncond:]).to(device)
     context_l = torch.tensor(test_mc.df.values[:, :ncond]).to(device)
     context_r = torch.tensor(test_dataset.df.values[:, :ncond]).to(device)
@@ -271,22 +291,9 @@ def main(cfg):
         # mc_to_data, _ = f4flow.batch_transform(inputs, context_l, target_context=None, inverse=False, batch_size=10000)
 
     # assign new columns
+    # so the df will have both the context and the transformed columns
     for i, col in enumerate(columns):
         test_mc.df[col] = mc_to_data[:, i].cpu().numpy()
-
-    print("Plotting histograms not scaled back")
-    for col in columns:
-        fig, ax = plt.subplots()
-        ax.hist(test_mc.df[col], bins=100, density=True, label="MC")
-        ax.hist(
-            mc_uncorr_df[col], bins=100, density=True, label="MC (uncorr)", alpha=0.5
-        )
-        ax.hist(test_dataset.df[col], bins=100, density=True, label="Data", alpha=0.5)
-        ax.legend()
-        ax.set_xlabel(col)
-        ax.set_ylabel("Events/binwidth")
-        fig.savefig(f"{outputpath_str}/hist_unscaled_{col}.png")
-        plt.close(fig)
 
     # scale back
     print("Scaling back")
@@ -298,13 +305,6 @@ def main(cfg):
     for col in columns:
         fig, ax = plt.subplots()
         ax.hist(test_mc.df[col], bins=100, density=True, label="MC")
-        ax.hist(
-            mc_scaledback_uncorr[col],
-            bins=100,
-            density=True,
-            label="MC (uncorr)",
-            alpha=0.5,
-        )
         ax.hist(test_dataset.df[col], bins=100, density=True, label="Data", alpha=0.5)
         ax.legend()
         ax.set_xlabel(col)

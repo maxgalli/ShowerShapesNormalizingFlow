@@ -1,6 +1,6 @@
 output:
   save_dir: output
-  name: cfg19
+  name: cfg19B
 general:
   sample: mc
   calo: eb
@@ -14,7 +14,7 @@ general:
     - probe_s4
     - probe_sieie
     - probe_sieip
-  nevents: 800000
+  nevents: 1000000
   scaler: qtgaus
 base:
   mc_eb:
@@ -48,7 +48,7 @@ base:
     coupling_width: 32
     coupling_depth: 2
 top_transformer_eb:
-  load_path: None
+  load_path: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg19B/top_eb/epoch_28_valloss_4.898.pt
   load_path_data: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg19/data_eb/epoch_45_valloss_4.849.pt
   load_path_mc: /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg19/mc_eb/epoch_40_valloss_4.838.pt
   batch_size: 1024

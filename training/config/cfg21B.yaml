@@ -1,0 +1,52 @@
+output:
+  save_dir: output
+  name: cfg21B
+general:
+  sample: mc
+  calo: eb
+  condition_columns:
+    - probe_pt
+    - probe_eta
+    - probe_phi
+    - probe_fixedGridRhoAll
+  columns:
+    - probe_r9
+    - probe_s4
+    - probe_sieie
+    - probe_sieip
+    - probe_etaWidth
+    - probe_phiWidth
+  nevents: 1000000
+  scaler: qtgaus
+base:
+  mc_eb:
+    load_path: None
+    batch_size: 512
+    lr: 0.0001
+    nepochs: 64
+    gclip: 5
+    nstack: 6
+    nblocks: 6
+    nnodes: 64
+    tail_bound: 5.0
+    nbins: 64
+    activation: relu
+    coupling: false
+    coupling_width: 64
+    coupling_depth: 3
+  data_eb:
+    load_path: None
+    batch_size: 512
+    lr: 0.0001
+    nepochs: 64
+    gclip: 5
+    nstack: 6
+    nblocks: 6
+    nnodes: 64
+    tail_bound: 5.0
+    nbins: 64
+    activation: relu
+    coupling: false
+    coupling_width: 64
+    coupling_depth: 3
+
