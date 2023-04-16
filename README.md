@@ -16,7 +16,11 @@ cd packages_to_install/flows4flows
 pip install -e .
 ```
 
-where the branch used in ```flows4flows``` id ```dev```.
+where the branch used in ```flows4flows``` is ```dev```.
+
+## Preprocessing
+
+## Training
 
 ## Config logs
 
@@ -30,5 +34,6 @@ where the branch used in ```flows4flows``` id ```dev```.
 - 23B: a bit more dropout
 - 23X: same as 23B, but switch data and mc as input to FFFCustom even if it does not make sense
 - 24: retry standard scaler
+- 24B: same as 24 but save every epoch
 
 Logs from 22 are the ones after changing ParquetDataset to accept functions for scaling and scaling back
