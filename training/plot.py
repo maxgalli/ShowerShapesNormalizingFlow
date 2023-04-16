@@ -227,7 +227,7 @@ def clf_reweight(df_mc, df_data, clf_name, n_jobs=1, cut=None):
 def main():
     calo = "eb"
     # output_dir = "/eos/home-g/gallim/www/plots/Hgg/NormFlowsCorrections/test"
-    output_dir = "/eos/home-g/gallim/www/plots/Hgg/NormFlowsCorrections/cfg23"
+    output_dir = "/eos/home-g/gallim/www/plots/Hgg/NormFlowsCorrections/cfg24"
     with open(
         "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/var_specs.json",
         "r",
@@ -265,7 +265,9 @@ def main():
     # mc_test_file = f"/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg16/top_{calo}/mc_to_data_{calo}.parquet"
     # mc_test_file = f"/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg19B/top_{calo}/mc_to_data_{calo}.parquet"
     #mc_test_file = f"/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg22B/top_{calo}/mc_to_data_{calo}.parquet"
-    mc_test_file = f"/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg23/top_{calo}/mc_to_data_{calo}.parquet"
+    #mc_test_file = f"/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg23/top_{calo}/mc_to_data_{calo}.parquet"
+    #mc_test_file = f"/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg23B/top_{calo}/mc_to_data_{calo}.parquet"
+    mc_test_file = f"/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/output/cfg24/top_{calo}/mc_to_data_{calo}.parquet"
 
     data_test_df = dd.read_parquet(
         data_test_file, columns=all_columns, engine="fastparquet"

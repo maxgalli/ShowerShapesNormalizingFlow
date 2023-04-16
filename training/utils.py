@@ -1,5 +1,10 @@
 from torch.utils.data import Dataset
+from torch import nn
+from torch.distributed import init_process_group, destroy_process_group
 import dask.dataframe as dd
+import os
+import json
+from scipy.stats import wasserstein_distance
 from sklearn.preprocessing import StandardScaler
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.preprocessing import PowerTransformer
@@ -12,6 +17,7 @@ from joblib import dump
 import pandas as pd
 import torch
 from nflows import transforms, flows
+from nflows.distributions.normal import ConditionalDiagonalNormal
 import matplotlib
 import matplotlib.pyplot as plt
 import itertools
@@ -31,216 +37,55 @@ from torch.nn.utils import clip_grad_norm_
 from copy import deepcopy
 
 
-def saturate_df(df):
-    df["probe_pt"] = df["probe_pt"].clip(upper=200)
-    if "probe_sieie" in df.columns:
-        df["probe_sieie"] = df["probe_sieie"].clip(upper=0.012, lower=0.005)
-    if "probe_sieip" in df.columns:
-        df["probe_sieip"] = df["probe_sieip"].clip(upper=0.0001, lower=-0.0001)
-    if "probe_etaWidth" in df.columns:
-        df["probe_etaWidth"] = df["probe_etaWidth"].clip(upper=0.025)
-    if "probe_phiWidth" in df.columns:
-        df["probe_phiWidth"] = df["probe_phiWidth"].clip(upper=0.125)
-    return df
-
-
-def scale_pt(pt_array):
-    pt_transformer = FunctionTransformer(np.log1p, inverse_func=np.expm1, validate=True)
-    pt_scaled = pt_transformer.transform(pt_array.reshape(-1, 1))
-    return pt_scaled, pt_transformer
-
-
-def standard_scaling(df, saturate=True, **kwargs):
-    # saturate
-    if saturate:
-        df = saturate_df(df)
-
-    # scale pt
-    pt = df["probe_pt"].values
-    df["probe_pt"], pt_transformer = scale_pt(pt)
-
-    # standard scaling
-    y = df.values
-    scaler = StandardScaler()
-    scaler.fit(y)
-    y_scaled = scaler.transform(y)
-    df = pd.DataFrame(y_scaled, columns=df.columns)
-
-    scalers = {
-        "scaler": scaler,
-        "pt_transformer": pt_transformer,
-    }
-
-    return df, scalers
-
-
-def qtgaus_scaling(df, saturate=True, **kwargs):
-    # saturate
-    if saturate:
-        df = saturate_df(df)
-
-    # scale pt
-    pt = df["probe_pt"].values
-    df["probe_pt"], pt_transformer = scale_pt(pt)
-
-    # qtgaus scaling
-    y = df.values
-    scaler = QuantileTransformer(
-        output_distribution="normal", n_quantiles=1000, random_state=0
-    )
-    scaler.fit(y)
-    y_scaled = scaler.transform(y)
-    df = pd.DataFrame(y_scaled, columns=df.columns)
-
-    scalers = {
-        "scaler": scaler,
-        "pt_transformer": pt_transformer,
-    }
-
-    return df, scalers
-
-
-def standard_scaling_inv(df, scalers):
-    # standard scaling
-    y = df.values
-    scaler = scalers["scaler"]
-    y_scaled = scaler.inverse_transform(y)
-    df = pd.DataFrame(y_scaled, columns=df.columns)
-
-    # unscale pt
-    pt_transformer = scalers["pt_transformer"]
-    pt_scaled = df["probe_pt"].values
-    df["probe_pt"] = pt_transformer.inverse_transform(pt_scaled.reshape(-1, 1))
-
-    return df
-
-
-def custom_scaling_1(df, saturate=True, **kwargs):
-    # saturate
-    if saturate:
-        df = saturate_df(df)
-
-    # scale pt
-    pt = df["probe_pt"].values
-    df["probe_pt"], pt_transformer = scale_pt(pt)
-
-    scaler_one_columns = [
-        "probe_pt",
-        "probe_eta",
-        "probe_phi",
-        "probe_fixedGridRhoAll",
-        "probe_r9",
-        "probe_s4",
-    ]
-    scaler_two_columns = [
-        "probe_sieie",
-        "probe_sieip",
-        "probe_etaWidth",
-        "probe_phiWidth",
-    ]
-    y_one = df[scaler_one_columns].values
-    y_two = df[scaler_two_columns].values
-    scaler_one = StandardScaler()
-    scaler_two = QuantileTransformer(output_distribution="normal")
-    scaler_one.fit(y_one)
-    scaler_two.fit(y_two)
-    y_one_scaled = scaler_one.transform(y_one)
-    y_two_scaled = scaler_two.transform(y_two)
-
-    df[scaler_one_columns] = pd.DataFrame(y_one_scaled, columns=scaler_one_columns)
-    df[scaler_two_columns] = pd.DataFrame(y_two_scaled, columns=scaler_two_columns)
-
-    scalers = {
-        "scaler_one": scaler_one,
-        "scaler_two": scaler_two,
-        "pt_transformer": pt_transformer,
-    }
-
-    return df, scalers
-
-
-def custom_scaling_1_inv(df, scalers):
-    scaler_one_columns = [
-        "probe_pt",
-        "probe_eta",
-        "probe_phi",
-        "probe_fixedGridRhoAll",
-        "probe_r9",
-        "probe_s4",
-    ]
-    scaler_two_columns = [
-        "probe_sieie",
-        "probe_sieip",
-        "probe_etaWidth",
-        "probe_phiWidth",
-    ]
-
-    y_one = df[scaler_one_columns].values
-    scaler_one = scalers["scaler_one"]
-    y_one_scaled = scaler_one.inverse_transform(y_one)
-    y_two = df[scaler_two_columns].values
-    scaler_two = scalers["scaler_two"]
-    y_two_scaled = scaler_two.inverse_transform(y_two)
-    df[scaler_one_columns] = pd.DataFrame(y_one_scaled, columns=scaler_one_columns)
-    df[scaler_two_columns] = pd.DataFrame(y_two_scaled, columns=scaler_two_columns)
-
-    # unscale pt
-    pt_transformer = scalers["pt_transformer"]
-    pt_scaled = df["probe_pt"].values
-    df["probe_pt"] = pt_transformer.inverse_transform(pt_scaled.reshape(-1, 1))
-
-    return df
-
-
-scaling_functions = {
-    "standard_scaling": standard_scaling,
-    "qtgaus_scaling": qtgaus_scaling,
-    "custom_scaling_1": custom_scaling_1,
-}
-scaling_functions_inv = {
-    "standard_scaling_inv": standard_scaling_inv,
-    "qtgaus_scaling_inv": standard_scaling_inv,
-    "custom_scaling_1_inv": custom_scaling_1_inv,
-}
+def ddp_setup(rank, world_size):
+    """
+    Args:
+        rank: Unique identifier of each process
+        world_size: Total number of processes
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
 class ParquetDataset(Dataset):
     def __init__(
         self,
-        files,
-        columns,
-        nevs=None,
-        scale_function="standard_scaling",
-        inverse_scale_function="standard_scaling_inv",
-        rng=(-5, 5),
-        saturate=True,
+        parquet_file,
+        context_variables,
+        target_variables,
+        device=None,
+        pipelines=None,
+        rows=None,
     ):
-        self.columns = columns
-        # self.df = dd.read_parquet(files, columns=columns, engine='fastparquet')
-        self.df = dd.read_parquet(
-            files, columns=columns, engine="fastparquet"
-        ).compute()
-
-        if nevs is not None:
-            self.df = self.df.iloc[:nevs]
-
-        self.scaling_function = scaling_functions[scale_function]
-        self.inverse_scale_function = scaling_functions_inv[inverse_scale_function]
-
-        self.df, self.scalers = self.scaling_function(self.df, saturate=saturate)
-
-    def get_scaled_back_df(self):
-        df = self.inverse_scale_function(self.df, self.scalers)
-        return df
-
-    def scale_back(self):
-        self.df = self.inverse_scale_function(self.df, self.scalers)
+        self.parquet_file = parquet_file
+        self.context_variables = context_variables
+        self.target_variables = target_variables
+        self.all_variables = context_variables + target_variables
+        data = pd.read_parquet(
+            parquet_file, columns=self.all_variables, engine="fastparquet"
+        )
+        self.pipelines = pipelines
+        if self.pipelines is not None:
+            for var, pipeline in self.pipelines.items():
+                if var in self.all_variables:
+                    data[var] = pipeline.transform(
+                        data[var].values.reshape(-1, 1)
+                    ).reshape(-1)
+        if rows is not None:
+            data = data.iloc[:rows]
+        self.target = data[target_variables].values
+        self.context = data[context_variables].values
+        if device is not None:
+            self.target = torch.tensor(self.target, dtype=torch.float32).to(device)
+            self.context = torch.tensor(self.context, dtype=torch.float32).to(device)
 
     def __len__(self):
-        return len(self.df)
+        assert len(self.context) == len(self.target)
+        return len(self.target)
 
-    def __getitem__(self, index):
-        return torch.from_numpy(self.df.iloc[index].values).float()
+    def __getitem__(self, idx):
+        return self.context[idx], self.target[idx]
 
 
 class BaseFlow(flows.Flow):
@@ -249,6 +94,10 @@ class BaseFlow(flows.Flow):
     Harmonises function calls with FlowForFlow model.
     Constructed and used exactly like an nflows.Flow object.
     """
+
+    def forward(self, inputs, context=None):
+        # raise RuntimeError("Forward method cannot be called for a Distribution object.")
+        return self.log_prob(inputs, context)
 
     def log_prob(
         self,
@@ -312,6 +161,38 @@ def spline_inn(
 
     return transforms.CompositeTransform(transform_list)
 
+
+def create_baseflow_model(
+    input_dim,
+    context_dim,
+    nnodes,
+    nblocks,
+    nstack,
+    tail_bound,
+    activation,
+    dropout_probability,
+    nbins,
+):
+    flow = BaseFlow(
+        spline_inn(
+            input_dim,
+            nodes=nnodes,
+            num_blocks=nblocks,
+            num_stack=nstack,
+            tail_bound=tail_bound,
+            activation=getattr(F, activation),
+            dropout_probability=dropout_probability,
+            num_bins=nbins,
+            context_features=context_dim,
+        ),
+        ConditionalDiagonalNormal(
+            shape=[input_dim], context_encoder=nn.Linear(context_dim, 2 * input_dim)
+        ),
+    )
+
+    return flow
+
+
 def divide_dist(distribution, bins):
     sorted_dist = np.sort(distribution)
     subgroup_size = len(distribution) // bins
@@ -320,6 +201,7 @@ def divide_dist(distribution, bins):
         edges.append(sorted_dist[i])
     edges[-1] = sorted_dist[-1]
     return edges
+
 
 def dump_profile_plot(
     ax, ss_name, cond_name, sample_name, ss_arr, cond_arr, color, cond_edges
@@ -342,6 +224,194 @@ def dump_profile_plot(
     ax.plot(centers, qlists[mid_index], color=color, label=sample_name)
 
     return ax
+
+
+def sample_and_plot_base(
+    test_loader,
+    model,
+    epoch,
+    writer,
+    context_variables,
+    target_variables,
+    device,
+):
+    target_size = len(target_variables)
+    with torch.no_grad():
+        gen, reco, samples = [], [], []
+        for context, target in test_loader:
+            context = context.to(device)
+            target = target.to(device)
+            sample = model.sample(num_samples=1, context=context)
+            context = context.detach().cpu().numpy()
+            target = target.detach().cpu().numpy()
+            sample = sample.detach().cpu().numpy()
+            sample = sample.reshape(-1, target_size)
+            gen.append(context)
+            reco.append(target)
+            samples.append(sample)
+    gen = np.concatenate(gen, axis=0)
+    reco = np.concatenate(reco, axis=0)
+    samples = np.concatenate(samples, axis=0)
+    gen = pd.DataFrame(gen, columns=context_variables)
+    reco = pd.DataFrame(reco, columns=target_variables)
+    samples = pd.DataFrame(samples, columns=target_variables)
+
+    # plot the reco and sampled distributions
+    for var in target_variables:
+        mn = min(reco[var].min(), samples[var].min())
+        mx = max(reco[var].max(), samples[var].max())
+        fig, ax = plt.subplots(1, 1, figsize=(15, 10), tight_layout=True)
+        ax.hist(reco[var], bins=100, histtype="step", label="reco", range=(mn, mx))
+        ws = wasserstein_distance(reco[var], samples[var])
+        ax.hist(
+            samples[var],
+            bins=100,
+            histtype="step",
+            label=f"sampled (wasserstein={ws:.3f})",
+            range=(mn, mx),
+        )
+        ax.set_xlabel(var)
+        ax.legend()
+        if device == 0 or type(device) != int:
+            writer.add_figure(f"{var}_reco_sampled", fig, epoch)
+
+    # plot after preprocessing back
+    preprocess_dct = test_loader.dataset.pipelines
+    reco_back = {}
+    samples_back = {}
+    with open("../../../preprocess/var_specs.json", "r") as f:
+        lst = json.load(f)
+        original_ranges = {dct["name"]: dct["range"] for dct in lst}
+    for var in target_variables:
+        reco_back[var] = (
+            preprocess_dct[var]
+            .inverse_transform(reco[var].values.reshape(-1, 1))
+            .reshape(-1)
+        )
+        samples_back[var] = (
+            preprocess_dct[var]
+            .inverse_transform(samples[var].values.reshape(-1, 1))
+            .reshape(-1)
+        )
+    reco_back = pd.DataFrame(reco_back)
+    samples_back = pd.DataFrame(samples_back)
+    for var in target_variables:
+        fig, ax = plt.subplots(1, 1, figsize=(15, 10), tight_layout=True)
+        ax.hist(
+            reco_back[var],
+            bins=100,
+            histtype="step",
+            label="reco",
+            range=original_ranges[var],
+        )
+        ax.hist(
+            samples_back[var],
+            bins=100,
+            histtype="step",
+            label="sampled",
+            range=original_ranges[var],
+        )
+        ax.set_xlabel(var)
+        ax.legend()
+        if device == 0 or type(device) != int:
+            writer.add_figure(f"{var}_reco_sampled_back", fig, epoch)
+
+
+def transform_and_plot_top(
+    mc_loader,
+    data_loader,
+    model,
+    epoch,
+    writer,
+    context_variables,
+    target_variables,
+    device,
+):
+    target_size = len(target_variables)
+    with torch.no_grad():
+        data_lst, mc_lst, mc_corr_lst = [], [], []
+        data_context_lst, mc_context_lst, mc_corr_context_lst = [], [], []
+        for data, mc in zip(data_loader, mc_loader):
+            context_data, target_data = data
+            context_mc, target_mc = mc
+            target_mc_corr, _ = model.transform(target_mc, context_mc, inverse=False)
+            target_data = target_data.detach().cpu().numpy()
+            target_mc = target_mc.detach().cpu().numpy()
+            target_mc_corr = target_mc_corr.detach().cpu().numpy()
+            context_data = context_data.detach().cpu().numpy()
+            context_mc = context_mc.detach().cpu().numpy()
+            data_lst.append(target_data)
+            mc_lst.append(target_mc)
+            mc_corr_lst.append(target_mc_corr)
+            data_context_lst.append(context_data)
+            mc_context_lst.append(context_mc)
+            mc_corr_context_lst.append(context_mc)
+    data = np.concatenate(data_lst, axis=0)
+    mc = np.concatenate(mc_lst, axis=0)
+    mc_corr = np.concatenate(mc_corr_lst, axis=0)
+    data = pd.DataFrame(data, columns=target_variables)
+    mc = pd.DataFrame(mc, columns=target_variables)
+    mc_corr = pd.DataFrame(mc_corr, columns=target_variables)
+    data_context = np.concatenate(data_context_lst, axis=0)
+    mc_context = np.concatenate(mc_context_lst, axis=0)
+    mc_corr_context = np.concatenate(mc_corr_context_lst, axis=0)
+    data_context = pd.DataFrame(data_context, columns=context_variables)
+    mc_context = pd.DataFrame(mc_context, columns=context_variables)
+    mc_corr_context = pd.DataFrame(mc_corr_context, columns=context_variables)
+        
+    # plot the reco and sampled distributions
+    for var in target_variables:
+        mn = min(data[var].min(), mc[var].min(), mc_corr[var].min())
+        mx = max(data[var].max(), mc[var].max(), mc_corr[var].max())
+        fig, ax = plt.subplots(1, 1, figsize=(15, 10), tight_layout=True)
+        ax.hist(data[var], bins=100, histtype="step", label="data", range=(mn, mx))
+        for smp, name in zip([mc, mc_corr], ["mc", "mc corr"]):
+            ws = wasserstein_distance(data[var], smp[var])
+            ax.hist(
+                smp[var],
+                bins=100,
+                histtype="step",
+                label=f"{name} (wasserstein={ws:.3f})",
+                range=(mn, mx),
+            )
+        ax.set_xlabel(var)
+        ax.legend()
+        if device == 0 or type(device) != int:
+            writer.add_figure(f"{var}_reco_sampled", fig, epoch)
+
+    # now plot profiles
+    nbins = 8
+    for column in target_variables:
+        for cond_column in context_variables:
+            fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+            data_ss_arr = data[column].values
+            data_cond_arr = data_context[cond_column].values
+            mc_uncorr_ss_arr = mc[column].values
+            mc_uncorr_cond_arr = mc_context[cond_column].values
+            mc_corr_ss_arr = mc_corr[column].values
+            mc_corr_cond_arr = mc_corr_context[cond_column].values
+            cond_edges = divide_dist(data_cond_arr, nbins)
+
+            for name, ss_arr, cond_arr, color in [
+                ("data", data_ss_arr, data_cond_arr, "blue"),
+                ("mc", mc_uncorr_ss_arr, mc_uncorr_cond_arr, "red"),
+                ("mc corr", mc_corr_ss_arr, mc_corr_cond_arr, "green"),
+            ]:
+                ax = dump_profile_plot(
+                    ax=ax,
+                    ss_name=column,
+                    cond_name=cond_column,
+                    sample_name=name,
+                    ss_arr=ss_arr,
+                    cond_arr=cond_arr,
+                    color=color,
+                    cond_edges=cond_edges,
+                )
+            ax.legend()
+            ax.set_xlabel(cond_column)
+            ax.set_ylabel(column)
+            if writer is not None:
+                writer.add_figure(f"profiles_{column}_{cond_column}", fig, epoch)
 
 
 def dump_validation_plots(
@@ -678,7 +748,9 @@ def train_batch_iterate(
     )
     ncond = len(condition_columns)
     model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.001)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=learning_rate, weight_decay=0.001
+    )
     num_steps = len(data_train) * n_epochs
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer=optimizer, T_max=num_steps, last_epoch=-1, eta_min=0
@@ -820,12 +892,12 @@ def train_batch_iterate(
         if vloss < best_vloss:
             best_vloss = vloss
             print("Saving model")
-            torch.save(
-                model.state_dict(),
-                f"{path}/epoch_{epoch}_valloss_{vloss:.3f}.pt".replace("-", "m"),
-            )
         else:
             print(f"Validation did not improve from {best_vloss:.4f} to {vloss:.4f}")
+        torch.save(
+            model.state_dict(),
+            f"{path}/epoch_{epoch}_valloss_{vloss:.3f}.pt".replace("-", "m"),
+        )
 
         # plot losses
         fig, ax = plt.subplots(1, 1, figsize=(10, 5))
