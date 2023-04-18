@@ -1,203 +1,273 @@
-import matplotlib.pyplot as plt
 import hydra
+from hydra.utils import get_original_cwd
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
-import pathlib
-import pandas as pd
+import os
+import sys
+import time
 import torch
-from torch import nn
-from torch import optim
 from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 import numpy as np
-import matplotlib
-from torch.nn import functional as F
-from nflows.distributions.normal import ConditionalDiagonalNormal
-from utils import ParquetDataset, BaseFlow, spline_inn, dump_validation_plots
+import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
+import pickle as pkl
+import torch.multiprocessing as mp
 
-np.random.seed(42)
-torch.manual_seed(42)
+from utils import (
+    ddp_setup,
+    ParquetDataset,
+    get_conditional_base_flow,
+    sample_and_plot_base,
+    create_mixture_flow_model,
+    load_mixture_model,
+    save_model,
+)
 
 
-@hydra.main(version_base=None, config_path="config", config_name="cfg0")
-def main(cfg):
-    print("Configuring job with following options")
-    print(OmegaConf.to_yaml(cfg))
+def train_base(device, cfg, world_size=None, device_ids=None):
+    # device is device when not distributed and rank when distributed
+    if world_size is not None:
+        ddp_setup(device, world_size)
 
-    sample = cfg.general.sample
-    if sample not in ["data", "mc"]:
-        raise ValueError("Sample must be either data or mc")
-    calo = cfg.general.calo
-    if calo not in ["eb", "ee"]:
-        raise ValueError("Calo must be either eb or ee")
-    outputpath_base_str = f"{cfg.output.save_dir}/{cfg.output.name}"
-    outputpath_base = pathlib.Path(outputpath_base_str)
-    outputpath_base.mkdir(parents=True, exist_ok=True)
-    with open(f"{outputpath_base_str}/{cfg.output.name}.yaml", "w") as file:
-        OmegaConf.save(config=cfg, f=file)
-    nevs = cfg.general.nevents
-    scale_func = cfg.general.scale_func
-    scale_func_inv = cfg.general.scale_func_inv
+    device_id = device_ids[device] if device_ids is not None else device
 
-    # Set device
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    # create (and load) the model
+    input_dim = len(cfg.target_variables)
+    context_dim = len(cfg.context_variables)
+    flow_params_dct = {
+        "input_dim": input_dim,
+        "context_dim": context_dim,
+        "base_kwargs": {
+            "num_steps_maf": cfg.model.maf.num_steps,
+            "num_steps_arqs": cfg.model.arqs.num_steps,
+            "num_transform_blocks_maf": cfg.model.maf.num_transform_blocks,
+            "num_transform_blocks_arqs": cfg.model.arqs.num_transform_blocks,
+            "activation": cfg.model.activation,
+            "dropout_probability_maf": cfg.model.maf.dropout_probability,
+            "dropout_probability_arqs": cfg.model.arqs.dropout_probability,
+            "use_residual_blocks_maf": cfg.model.maf.use_residual_blocks,
+            "use_residual_blocks_arqs": cfg.model.arqs.use_residual_blocks,
+            "batch_norm_maf": cfg.model.maf.batch_norm,
+            "batch_norm_arqs": cfg.model.arqs.batch_norm,
+            "num_bins_arqs": cfg.model.arqs.num_bins,
+            "tail_bound_arqs": cfg.model.arqs.tail_bound,
+            "hidden_dim_maf": cfg.model.maf.hidden_dim,
+            "hidden_dim_arqs": cfg.model.arqs.hidden_dim,
+            "init_identity": cfg.model.init_identity,
+        },
+        "transform_type": cfg.model.transform_type,
+    }
+    model = create_mixture_flow_model(**flow_params_dct).to(device)
 
-    # Get training data
+    if cfg.checkpoint is not None:
+        # assume that the checkpoint is path to a directory
+        model, _, _, start_epoch, _, _ = load_mixture_model(
+            model, model_dir=cfg.checkpoint, filename="checkpoint-latest.pt"
+        )
+        model = model.to(device)
+        print("Loaded model from checkpoint: ", cfg.checkpoint)
+        print("Resuming from epoch ", start_epoch)
+    else:
+        start_epoch = 1
+
+    if world_size is not None:
+        ddp_model = DDP(
+            model,
+            device_ids=[device],
+            output_device=device,
+            # find_unused_parameters=True,
+        )
+        model = ddp_model.module
+    else:
+        ddp_model = model
+    print("Number of parameters: ", sum(p.numel() for p in model.parameters()))
+    # make datasets
+    sample = cfg.sample
+    calo = cfg.calo
+
     if sample == "data":
         if calo == "eb":
-            train_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/data_eb_train.parquet"
-            val_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/data_eb_val.parquet"
+            train_file = "../../../preprocess/preprocessed/data_eb_train.parquet"
+            test_file = "../../../preprocess/preprocessed/data_eb_test.parquet"
         elif calo == "ee":
-            train_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/data_ee_train.parquet"
-            val_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/data_ee_val.parquet"
+            train_file = "../../../preprocess/preprocessed/data_ee_train.parquet"
+            test_file = "../../../preprocess/preprocessed/data_ee_test.parquet"
     elif sample == "mc":
         if calo == "eb":
-            train_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/mc_eb_train.parquet"
-            val_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/mc_eb_val.parquet"
+            train_file = "../../../preprocess/preprocessed/mc_eb_train.parquet"
+            test_file = "../../../preprocess/preprocessed/mc_eb_test.parquet"
         elif calo == "ee":
-            train_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/mc_ee_train.parquet"
-            val_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/mc_ee_val.parquet"
+            train_file = "../../../preprocess/preprocessed/mc_ee_train.parquet"
+            test_file = "../../../preprocess/preprocessed/mc_ee_test.parquet"
 
-    condition_columns = cfg.general.condition_columns
-    columns = cfg.general.columns
-    ncond = len(condition_columns)
-    all_columns = condition_columns + columns
+    with open(
+        f"../../../preprocess/preprocessed/pipelines_{sample}_{calo}.pkl", "rb"
+    ) as file:
+        pipelines = pkl.load(file)
+        pipelines = pipelines[cfg.pipelines]
 
-    base_conf = cfg.base[f"{sample}_{calo}"]
-
-    rng = (-base_conf.tail_bound, base_conf.tail_bound)
-    datadataset = ParquetDataset(
-        files=train_file,
-        columns=all_columns,
-        nevs=nevs,
-        scale_function=scale_func,
-        inverse_scale_function=scale_func_inv,
-        rng=rng,
+    train_dataset = ParquetDataset(
+        train_file,
+        cfg.context_variables,
+        cfg.target_variables,
+        device=device,
+        pipelines=pipelines,
+        rows=cfg.train.size,
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=cfg.train.batch_size,
+        shuffle=False if world_size is not None else True,
+        sampler=DistributedSampler(train_dataset) if world_size is not None else None,
+        # num_workers=2,
+        # pin_memory=True,
+    )
+    test_dataset = ParquetDataset(
+        test_file,
+        cfg.context_variables,
+        cfg.target_variables,
+        device=device,
+        pipelines=train_dataset.pipelines,
+        rows=cfg.test.size,
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=cfg.test.batch_size,
+        shuffle=False,
+        # num_workers=2,
+        # pin_memory=True,
     )
 
-    valdataset = ParquetDataset(
-        files=val_file,
-        columns=all_columns,
-        nevs=90000,
-        scale_function=scale_func,
-        inverse_scale_function=scale_func_inv,
-        rng=rng,
+    # train the model
+    writer = SummaryWriter(log_dir="runs")
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=cfg.optimizer.learning_rate,
+        betas=(cfg.optimizer.beta1, cfg.optimizer.beta2),
+        weight_decay=cfg.optimizer.weight_decay,
     )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, cfg.epochs)
 
-    dataloader = DataLoader(datadataset, batch_size=base_conf.batch_size, shuffle=True)
-    valdataloader = DataLoader(
-        valdataset, batch_size=base_conf.batch_size, shuffle=True
-    )
-
-    label = f"{sample}_{calo}"
-    outputpath_str = f"{outputpath_base_str}/{label}"
-    outputpath = pathlib.Path(outputpath_str)
-    outputpath.mkdir(parents=True, exist_ok=True)
-    writer = SummaryWriter(outputpath_str)
-
-    # build flow
-    flow = BaseFlow(
-        spline_inn(
-            len(columns),
-            nodes=base_conf.nnodes,
-            num_blocks=base_conf.nblocks,
-            num_stack=base_conf.nstack,
-            tail_bound=base_conf.tail_bound,
-            activation=getattr(F, base_conf.activation),
-            dropout_probability=base_conf.dropout_probability,
-            num_bins=base_conf.nbins,
-            context_features=ncond,
-        ),
-        ConditionalDiagonalNormal(
-            shape=[len(columns)], context_encoder=nn.Linear(ncond, 2 * len(columns))
-        ),
-    )
-
-    # train
-    if pathlib.Path(base_conf.load_path).is_file():
-        print(f"Loading base_{label} from model: {base_conf.load_path}")
-        flow.load_state_dict(torch.load(base_conf.load_path, map_location=device))
-    else:
-        n_epochs = base_conf.nepochs
-        print(
-            f"Training {cfg.output.name} on {device} with {n_epochs} epochs and learning rate {base_conf.lr}."
-        )
-        optimizer = optim.Adam(flow.parameters(), lr=base_conf.lr, weight_decay=1e-5)
-        train_losses = []
-        val_losses = []
-        best_vloss = np.inf
-
-        for epoch in range(n_epochs):
-            epoch += 1
-            tl = []
-            vl = []
-            flow.to(device)
-            flow.train()
-            for i, x in enumerate(dataloader):
-                x_input = torch.tensor(x[:, ncond:], dtype=torch.float32).to(device)
-                x_cond = torch.tensor(x[:, :ncond], dtype=torch.float32).to(device)
-                # print(x_input.shape)
-                optimizer.zero_grad()
-                loss = -flow.log_prob(inputs=x_input, context=x_cond).mean()
-                # loss = -flow.log_prob(inputs=x_input).mean()
-                tl.append(loss.item())
-                loss.backward()
-                optimizer.step()
-                # print(loss.item())
-            # validation
-            for i, x in enumerate(valdataloader):
-                x_input = torch.tensor(x[:, ncond:], dtype=torch.float32).to(device)
-                x_cond = torch.tensor(x[:, :ncond], dtype=torch.float32).to(device)
-                loss = -flow.log_prob(inputs=x_input, context=x_cond).mean()
-                vl.append(loss.item())
-
-            epoch_tloss = np.mean(tl)
-            epoch_vloss = np.mean(vl)
-            train_losses.append(epoch_tloss)
-            val_losses.append(epoch_vloss)
-            writer.add_scalars(
-                "losses",
-                {"train": epoch_tloss, "val": epoch_vloss},
-                epoch,
+    train_history, test_history = [], []
+    for epoch in range(start_epoch, cfg.epochs + 1):
+        if world_size is not None:
+            b_sz = len(next(iter(train_loader))[0])
+            print(
+                f"[GPU{device_id}] | Rank {device} | Epoch {epoch} | Batchsize: {b_sz} | Steps: {len(train_loader)}"
             )
-            print(f"epoch {epoch}: loss = {np.mean(tl)}, val loss = {epoch_vloss}")
+            train_loader.sampler.set_epoch(epoch)
+        print(f"Epoch {epoch}/{cfg.epochs}:")
 
-            if epoch_vloss < best_vloss:
-                print("Saving model")
-                torch.save(
-                    flow.state_dict(),
-                    f"{outputpath_str}/epoch_{epoch}_valloss_{epoch_vloss:.3f}.pt".replace(
-                        "-", "m"
-                    ),
-                )
-                best_vloss = epoch_vloss
-            else:
-                print(
-                    f"Validation loss did not improve from {best_vloss:.3f} to {epoch_vloss:.3f}."
-                )
+        train_losses = []
+        test_losses = []
+        # train
+        start = time.time()
+        print("Training...")
+        for i, (context, target) in enumerate(train_loader):
+            # context, target = context.to(device), target.to(device)
+            model.train()
+            optimizer.zero_grad()
 
-            # dump validation plots only at the end and at the middle of the training
-            if epoch % 5 == 0:
-                dump_validation_plots(
-                    flow,
-                    valdataset,
-                    columns,
-                    condition_columns,
-                    1,
-                    device,
-                    outputpath_str,
-                    epoch,
-                    rng=rng,
-                    writer=writer,
-                )
+            loss = -ddp_model(target, context=context)
+            loss = loss.mean()
+            train_losses.append(loss.item())
 
-            # plot losses
-            fig, ax = plt.subplots(1, 1, figsize=(10, 5))
-            ax.plot(train_losses, label="train")
-            ax.plot(val_losses, label="val")
-            ax.set_xlabel("epoch")
-            ax.set_ylabel("loss")
-            ax.legend()
-            fig.savefig(f"{outputpath_str}/losses.png")
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+        epoch_train_loss = np.mean(train_losses)
+        train_history.append(epoch_train_loss)
+
+        # test
+        print("Testing...")
+        for i, (context, target) in enumerate(test_loader):
+            # context, target = context.to(device), target.to(device)
+            with torch.no_grad():
+                model.eval()
+                loss = -ddp_model(target, context=context)
+                loss = loss.mean()
+                test_losses.append(loss.item())
+
+        epoch_test_loss = np.mean(test_losses)
+        test_history.append(epoch_test_loss)
+        if device == 0 or world_size is None:
+            writer.add_scalars(
+                "Losses", {"train": epoch_train_loss, "val": epoch_test_loss}, epoch
+            )
+
+        # sample and validation
+        if epoch % cfg.sample_every == 0 or epoch == 1:
+            print("Sampling and plotting...")
+            sample_and_plot_base(
+                test_loader=test_loader,
+                model=model,
+                epoch=epoch,
+                writer=writer,
+                context_variables=cfg.context_variables,
+                target_variables=cfg.target_variables,
+                device=device,
+            )
+
+        duration = time.time() - start
+        print(
+            f"Epoch {epoch} | GPU{device_id} | Rank {device} - train loss: {epoch_train_loss:.4f} - val loss: {epoch_test_loss:.4f} - time: {duration:.2f}s"
+        )
+
+        if device == 0 or world_size is None:
+            save_model(
+                epoch,
+                ddp_model,
+                scheduler,
+                train_history,
+                test_history,
+                name="model",
+                model_dir=".",
+                optimizer=optimizer,
+                is_ddp=world_size is not None,
+                save_both=epoch % cfg.sample_every == 0,
+            )
+
+    writer.close()
+
+
+@hydra.main(version_base=None, config_path="config_base", config_name="cfg_test")
+def main(cfg):
+    # This because in the hydra config we enable the feature that changes the cwd to the experiment dir
+    initial_dir = get_original_cwd()
+    print("Initial dir: ", initial_dir)
+    print("Current dir: ", os.getcwd())
+
+    # save the config
+    cfg_name = HydraConfig.get().job.name
+    with open(f"{os.getcwd()}/{cfg_name}.yaml", "w") as file:
+        OmegaConf.save(config=cfg, f=file)
+
+    env_var = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if env_var:
+        actual_devices = env_var.split(",")
+        actual_devices = [int(d) for d in actual_devices]
+    else:
+        actual_devices = list(range(torch.cuda.device_count()))
+    print("Actual devices: ", actual_devices)
+
+    print("Training with cfg: \n", OmegaConf.to_yaml(cfg))
+    if cfg.distributed:
+        world_size = torch.cuda.device_count()
+        # make a dictionary with k: rank, v: actual device
+        dev_dct = {i: actual_devices[i] for i in range(world_size)}
+        print(f"Devices dict: {dev_dct}")
+        mp.spawn(
+            train_base,
+            args=(cfg, world_size, dev_dct),
+            nprocs=world_size,
+            join=True,
+        )
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        train_base(device, cfg)
 
 
 if __name__ == "__main__":

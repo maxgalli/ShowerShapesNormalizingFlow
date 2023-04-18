@@ -1,323 +1,345 @@
-import matplotlib.pyplot as plt
 import hydra
+from hydra.utils import get_original_cwd
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
-import pathlib
-import glob
 import os
-import pandas as pd
 import sys
-import itertools
+import time
 import torch
-from torch import nn
-from torch.utils.data import DataLoader
-import numpy as np
-from nflows.distributions.normal import ConditionalDiagonalNormal
-import matplotlib
+from torch.utils.data import Dataset, DataLoader
 from torch.nn import functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+import numpy as np
+import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
-from utils import ParquetDataset
-from utils import spline_inn
-from utils import BaseFlow
-from utils import FFFCustom
-from utils import get_flow4flow
-from utils import set_penalty
-from utils import train_batch_iterate
-from utils import train_forward
+from scipy.stats import wasserstein_distance
+import matplotlib.pyplot as plt
+import pickle as pkl
+import torch.multiprocessing as mp
+from torch.profiler import profile, record_function, ProfilerActivity
 
-np.random.seed(42)
-torch.manual_seed(42)
+from utils import (
+    ddp_setup,
+    ParquetDataset,
+    get_conditional_base_flow,
+    sample_and_plot_base,
+    spline_inn,
+    create_mixture_flow_model,
+    load_mixture_model,
+    save_model,
+    set_penalty,
+    transform_and_plot_top,
+    FFFCustom
+)
+
+def train_top(device, cfg, world_size=None, device_ids=None):
+    # device is device when not distributed and rank when distributed
+    if world_size is not None:
+        ddp_setup(device, world_size)
+
+    device_id = device_ids[device] if device_ids is not None else device
+
+    # models
+    input_dim = len(cfg.target_variables)
+    context_dim = len(cfg.context_variables)
+    flow_params_dct = {
+        "input_dim": input_dim,
+        "context_dim": context_dim,
+        "base_kwargs": {
+            "num_steps_maf": cfg.model.maf.num_steps,
+            "num_steps_arqs": cfg.model.arqs.num_steps,
+            "num_transform_blocks_maf": cfg.model.maf.num_transform_blocks,
+            "num_transform_blocks_arqs": cfg.model.arqs.num_transform_blocks,
+            "activation": cfg.model.activation,
+            "dropout_probability_maf": cfg.model.maf.dropout_probability,
+            "dropout_probability_arqs": cfg.model.arqs.dropout_probability,
+            "use_residual_blocks_maf": cfg.model.maf.use_residual_blocks,
+            "use_residual_blocks_arqs": cfg.model.arqs.use_residual_blocks,
+            "batch_norm_maf": cfg.model.maf.batch_norm,
+            "batch_norm_arqs": cfg.model.arqs.batch_norm,
+            "num_bins_arqs": cfg.model.arqs.num_bins,
+            "tail_bound_arqs": cfg.model.arqs.tail_bound,
+            "hidden_dim_maf": cfg.model.maf.hidden_dim,
+            "hidden_dim_arqs": cfg.model.arqs.hidden_dim,
+            "init_identity": cfg.model.init_identity,
+        },
+        "transform_type": cfg.model.transform_type,
+    }
+
+    model_data = create_mixture_flow_model(**flow_params_dct)
+    model_data, _, _, _, _, _ = load_mixture_model(
+        model_data, model_dir=cfg.data.checkpoint, filename="checkpoint-latest.pt"
+    )
+    model_data = model_data.to(device)
+    model_mc = create_mixture_flow_model(**flow_params_dct).to(device)
+    model_mc, _, _, _, _, _ = load_mixture_model(
+        model_mc, model_dir=cfg.mc.checkpoint, filename="checkpoint-latest.pt"
+    )
+    model_mc = model_mc.to(device)
+
+    flow_params_dct["fff_type"] = cfg.model.fff_type
+    flow_params_dct["mc_flow"] = model_mc
+    flow_params_dct["data_flow"] = model_data
+    #model = create_mixture_flow_model(**flow_params_dct)
+    model = FFFCustom(
+        spline_inn(
+            input_dim,
+            nodes=64,
+            num_blocks=12,
+            num_stack=4,
+            tail_bound=1.0,
+            activation=F.relu,
+            dropout_probability=0.2,
+            num_bins=64,
+            context_features=context_dim,
+            flow_for_flow=True,
+        ),
+        model_data,
+        model_mc
+    )
+    set_penalty(
+        model,
+        cfg.model.penalty,
+        cfg.model.penalty_weight,
+        cfg.model.anneal
+    )
+    model = model.to(device)
+    start_epoch = 1
+
+    if world_size is not None:
+        ddp_model = DDP(
+            model,
+            device_ids=[device],
+            output_device=device,
+            find_unused_parameters=True,
+        )
+        model = ddp_model.module
+    else:
+        ddp_model = model
+    print("Number of parameters: ", sum(p.numel() for p in model.parameters()))
+
+    # make datasets
+    calo = cfg.calo
+    train_file_data = f"../../../preprocess/preprocessed/data_{calo}_train.parquet"
+    train_file_mc = f"../../../preprocess/preprocessed/mc_{calo}_train.parquet"
+    test_file_data = f"../../../preprocess/preprocessed/data_{calo}_test.parquet"
+    test_file_mc = f"../../../preprocess/preprocessed/mc_{calo}_test.parquet"
+
+    with open(f"../../../preprocess/preprocessed/pipelines_data_{calo}.pkl", "rb") as file:
+        pipelines_data = pkl.load(file)
+        pipelines_data = pipelines_data[cfg.pipelines]
+    
+    with open(f"../../../preprocess/preprocessed/pipelines_mc_{calo}.pkl", "rb") as file:
+        pipelines_mc = pkl.load(file)
+        pipelines_mc = pipelines_mc[cfg.pipelines]
+    
+    train_dataset_data = ParquetDataset(
+        train_file_data,
+        cfg.context_variables,
+        cfg.target_variables,
+        device=device,
+        pipelines=pipelines_data,
+        rows=cfg.train.size,
+    )
+    train_loader_data = DataLoader(
+        train_dataset_data,
+        batch_size=cfg.train.batch_size,
+        shuffle=False if world_size is not None else True,
+        sampler=DistributedSampler(train_dataset_data) if world_size is not None else None,
+    )
+    test_dataset_data = ParquetDataset(
+        test_file_data,
+        cfg.context_variables,
+        cfg.target_variables,
+        device=device,
+        pipelines=pipelines_data,
+        rows=cfg.test.size,
+    )
+    test_loader_data = DataLoader(
+        test_dataset_data,
+        batch_size=cfg.test.batch_size,
+        shuffle=False if world_size is not None else True,
+        sampler=DistributedSampler(test_dataset_data) if world_size is not None else None,
+    )
+    train_dataset_mc = ParquetDataset(
+        train_file_mc,
+        cfg.context_variables,
+        cfg.target_variables,
+        device=device,
+        pipelines=pipelines_mc,
+        rows=cfg.train.size,
+    )
+    train_loader_mc = DataLoader(
+        train_dataset_mc,
+        batch_size=cfg.train.batch_size,
+        shuffle=False if world_size is not None else True,
+        sampler=DistributedSampler(train_dataset_mc) if world_size is not None else None,
+    )
+    test_dataset_mc = ParquetDataset(
+        test_file_mc,
+        cfg.context_variables,
+        cfg.target_variables,
+        device=device,
+        pipelines=pipelines_mc,
+        rows=cfg.test.size,
+    )
+    test_loader_mc = DataLoader(
+        test_dataset_mc,
+        batch_size=cfg.test.batch_size,
+        shuffle=False if world_size is not None else True,
+        sampler=DistributedSampler(test_dataset_mc) if world_size is not None else None,
+    )
+
+    # train the model
+    writer = SummaryWriter(log_dir="runs")
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=cfg.optimizer.learning_rate,
+        betas=(cfg.optimizer.beta1, cfg.optimizer.beta2),
+        weight_decay=cfg.optimizer.weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, cfg.epochs)
+
+    train_history, test_history = [], []
+    
+    for epoch in range(start_epoch, cfg.epochs + 1):
+        if world_size is not None:
+            b_sz = len(next(iter(train_loader_mc))[0])
+            print(
+                f"[GPU{device_id}] | Rank {device} | Epoch {epoch} | Batchsize: {b_sz} | Steps: {len(train_loader_mc)}"
+            )
+            train_loader_mc.sampler.set_epoch(epoch)
+            train_loader_data.sampler.set_epoch(epoch)
+       
+        print(f"Epoch {epoch}/{cfg.epochs}:")
+        epoch_is_even = epoch % 2 == 0
+        start = time.time()
+        train_losses = []
+        test_losses = []
+        # train
+        print("Training...")
+        for i, (data, mc) in enumerate(zip(train_loader_data, train_loader_mc)):
+            if i % 2 == 0 + int(epoch_is_even):
+                #print(f"Epoch {epoch} - Batch {i} - inverse = False")
+                context, target = mc
+                other_context, other_target = data
+                inverse = False
+            else:
+                context, target = data
+                other_context, other_target = mc
+                inverse = True
+            
+            optimizer.zero_grad()
+            
+            #loss = - model.log_prob(inputs=target, input_context=context, target_context=other_context, inverse=inverse)
+            loss = - ddp_model(inputs=target, input_context=context, target_context=other_context, inverse=inverse)
+            #print(loss)
+            loss = loss.mean()
+            train_losses.append(loss.item())
+
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+        
+        epoch_train_loss = np.mean(train_losses)
+        train_history.append(epoch_train_loss)
+
+        # test
+        print("Testing...")
+        for i, (data, mc) in enumerate(zip(test_loader_data, test_loader_mc)):
+            if i % 2 == 0 + int(epoch_is_even):
+                context, target = mc
+                other_context, other_target = data
+                inverse = False
+            else:
+                context, target = data
+                other_context, other_target = mc
+                inverse = True
+            with torch.no_grad():
+                #loss = - model.log_prob(inputs=target, input_context=context, target_context=other_context, inverse=inverse)
+                loss = - ddp_model(inputs=target, input_context=context, target_context=other_context, inverse=inverse)
+                loss = loss.mean()
+                test_losses.append(loss.item())
+
+        epoch_test_loss = np.mean(test_losses)
+        test_history.append(epoch_test_loss)
+        if device == 0 or world_size is None:
+            writer.add_scalars(
+                "Losses", {"train": epoch_train_loss, "val": epoch_test_loss}, epoch
+            )
+
+        # sample and validation
+        if epoch % cfg.sample_every == 0 or epoch == 1:
+            print("Sampling and plotting...")
+            transform_and_plot_top(
+                mc_loader=test_loader_mc,
+                data_loader=test_loader_data,
+                model=model,
+                epoch=epoch,
+                writer=writer,
+                context_variables=cfg.context_variables,
+                target_variables=cfg.target_variables,
+                device=device,
+            )
+
+        duration = time.time() - start
+        print(
+            f"Epoch {epoch} | GPU{device_id} | Rank {device} - train loss: {epoch_train_loss:.4f} - val loss: {epoch_test_loss:.4f} - time: {duration:.2f}s"
+        )
+
+        #if device == 0 or world_size is None:
+        #    save_model(
+        #        epoch,
+        #        ddp_model,
+        #        scheduler,
+        #        train_history,
+        #        test_history,
+        #        name="model",
+        #        model_dir=".",
+        #        optimizer=optimizer,
+        #        is_ddp=world_size is not None,
+        #        save_both=epoch % cfg.sample_every == 0,
+        #    )
+
+    writer.close()
 
 
-@hydra.main(version_base=None, config_path="config", config_name="cfg0")
+@hydra.main(version_base=None, config_path="config_top", config_name="cfg_test")
 def main(cfg):
-    print("Configuring job with following options")
-    print(OmegaConf.to_yaml(cfg))
+    # This because in the hydra config we enable the feature that changes the cwd to the experiment dir
+    initial_dir = get_original_cwd()
+    print("Initial dir: ", initial_dir)
+    print("Current dir: ", os.getcwd())
 
-    calo = cfg.general.calo
-    if calo not in ["eb", "ee"]:
-        raise ValueError("Calo must be either eb or ee")
-    outputpath_base_str = f"{cfg.output.save_dir}/{cfg.output.name}"
-    outputpath_base = pathlib.Path(outputpath_base_str)
-    outputpath_base.mkdir(parents=True, exist_ok=True)
-    nevs = cfg.general.nevents
-    scale_func = cfg.general.scale_func
-    scale_func_inv = cfg.general.scale_func_inv
+    # save the config
+    cfg_name = HydraConfig.get().job.name
+    with open(f"{os.getcwd()}/{cfg_name}.yaml", "w") as file:
+        OmegaConf.save(config=cfg, f=file)
+    
+    env_var = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if env_var:
+        actual_devices = env_var.split(",")
+        actual_devices = [int(d) for d in actual_devices]
+    else:
+        actual_devices = list(range(torch.cuda.device_count()))
+    print("Actual devices: ", actual_devices)
 
-    # Set device
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-    if calo == "eb":
-        data_train_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/data_eb_train.parquet"
-        data_val_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/data_eb_val.parquet"
-        mc_train_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/mc_eb_train.parquet"
-        mc_val_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/mc_eb_val.parquet"
-    elif calo == "ee":
-        data_train_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/data_ee_train.parquet"
-        data_val_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/data_ee_val.parquet"
-        mc_train_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/mc_ee_train.parquet"
-        mc_val_file = "/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/mc_ee_val.parquet"
-
-    condition_columns = cfg.general.condition_columns
-    columns = cfg.general.columns
-    ncond = len(condition_columns)
-    all_columns = condition_columns + columns
-
-    # build flow
-    label_data = f"data_{calo}"
-    data_base_flow = BaseFlow(
-        spline_inn(
-            len(columns),
-            nodes=cfg.base[label_data].nnodes,
-            num_blocks=cfg.base[label_data].nblocks,
-            num_stack=cfg.base[label_data].nstack,
-            tail_bound=cfg.base[label_data].tail_bound,
-            activation=getattr(F, cfg.base[label_data].activation),
-            dropout_probability=cfg.base[label_data].dropout_probability,
-            num_bins=cfg.base[label_data].nbins,
-            context_features=ncond,
-        ),
-        ConditionalDiagonalNormal(
-            shape=[len(columns)], context_encoder=nn.Linear(ncond, 2 * len(columns))
-        ),
-    )
-    label_mc = f"mc_{calo}"
-    mc_base_flow = BaseFlow(
-        spline_inn(
-            len(columns),
-            nodes=cfg.base[label_mc].nnodes,
-            num_blocks=cfg.base[label_mc].nblocks,
-            num_stack=cfg.base[label_mc].nstack,
-            tail_bound=cfg.base[label_mc].tail_bound,
-            activation=getattr(F, cfg.base[label_mc].activation),
-            dropout_probability=cfg.base[label_mc].dropout_probability,
-            num_bins=cfg.base[label_mc].nbins,
-            context_features=ncond,
-        ),
-        ConditionalDiagonalNormal(
-            shape=[len(columns)], context_encoder=nn.Linear(ncond, 2 * len(columns))
-        ),
-    )
-
-    top_transformer = cfg[f"top_transformer_{calo}"]
-    label = f"top_{calo}"
-    outputpath_str = f"{outputpath_base_str}/{label}"
-    outputpath = pathlib.Path(outputpath_str)
-    outputpath.mkdir(parents=True, exist_ok=True)
-    writer = SummaryWriter(outputpath_str)
-
-    data_base_flow.load_state_dict(
-        torch.load(top_transformer.load_path_data, map_location=device)
-    )
-
-    mc_base_flow.load_state_dict(
-        torch.load(top_transformer.load_path_mc, map_location=device)
-    )
-
-    # load data
-    d_dataset = ParquetDataset(
-        files=data_train_file,
-        columns=all_columns,
-        nevs=nevs,
-        scale_function=scale_func,
-        inverse_scale_function=scale_func_inv,
-    )
-    val_dataset = ParquetDataset(
-        files=data_val_file,
-        columns=all_columns,
-        scale_function=scale_func,
-        inverse_scale_function=scale_func_inv,
-        nevs=80000,
-    )
-    mc_dataset = ParquetDataset(
-        files=mc_train_file,
-        columns=all_columns,
-        scale_function=scale_func,
-        inverse_scale_function=scale_func_inv,
-        nevs=nevs,
-    )
-    mc_val_dataset = ParquetDataset(
-        files=mc_val_file,
-        columns=all_columns,
-        scale_function=scale_func,
-        inverse_scale_function=scale_func_inv,
-        nevs=80000,
-    )
-    # make sure we have the same number of events in data and mc
-    min_evs_train = min(len(d_dataset), len(mc_dataset))
-    min_evs_val = min(len(val_dataset), len(mc_val_dataset))
-    d_dataset.df = d_dataset.df.iloc[:min_evs_train]
-    mc_dataset.df = mc_dataset.df.iloc[:min_evs_train]
-    val_dataset.df = val_dataset.df.iloc[:min_evs_val]
-    mc_val_dataset.df = mc_val_dataset.df.iloc[:min_evs_val]
-    print(f"n events train: {min_evs_train}")
-    print(f"n events val: {min_evs_val}")
-
-    dataloader = DataLoader(
-        d_dataset, batch_size=top_transformer.batch_size, shuffle=True
-    )
-    val_dataloader = DataLoader(
-        val_dataset, batch_size=top_transformer.batch_size, shuffle=True
-    )
-    mcloader = DataLoader(
-        mc_dataset, batch_size=top_transformer.batch_size, shuffle=True
-    )
-    val_mcloader = DataLoader(
-        mc_val_dataset, batch_size=top_transformer.batch_size, shuffle=True
-    )
-    # print(len(d_dataset), len(mc_dataset), len(val_dataset), len(mc_val_dataset))
-
-    if top_transformer.flow4flow != "FFFCustom":
-        f4flow = get_flow4flow(
-            top_transformer.flow4flow,
-            spline_inn(
-                len(columns),
-                nodes=top_transformer.nnodes,
-                num_blocks=top_transformer.nblocks,
-                num_stack=top_transformer.nstack,
-                tail_bound=top_transformer.tail_bound,
-                activation=getattr(F, top_transformer.activation),
-                dropout_probability=top_transformer.dropout_probability,
-                num_bins=top_transformer.nbins,
-                context_features=ncond,
-                flow_for_flow=True,
-            ),
-            distribution_right=data_base_flow,
-            distribution_left=mc_base_flow,
+    print("Training with cfg: \n", OmegaConf.to_yaml(cfg))
+    if cfg.distributed:
+        world_size = torch.cuda.device_count()
+        # make a dictionary with k: rank, v: actual device
+        dev_dct = {i: actual_devices[i] for i in range(world_size)}
+        print(f"Devices dict: {dev_dct}")
+        mp.spawn(
+            train_top,
+            args=(cfg, world_size, dev_dct),
+            nprocs=world_size,
+            join=True,
         )
     else:
-        f4flow = FFFCustom(
-            spline_inn(
-                len(columns),
-                nodes=top_transformer.nnodes,
-                num_blocks=top_transformer.nblocks,
-                num_stack=top_transformer.nstack,
-                tail_bound=top_transformer.tail_bound,
-                activation=getattr(F, top_transformer.activation),
-                dropout_probability=top_transformer.dropout_probability,
-                num_bins=top_transformer.nbins,
-                context_features=ncond,
-                flow_for_flow=True,
-            ),
-            mc_base_flow,
-            data_base_flow,
-        )
-    set_penalty(
-        f4flow,
-        top_transformer.penalty,
-        top_transformer.penalty_weight,
-        top_transformer.anneal,
-    )
-    rng = (-top_transformer.tail_bound, top_transformer.tail_bound)
-
-    # train_data = ConditionalDataToData(d_dataset, mc_dataset)
-    # val_data = ConditionalDataToData(val_dataset, mc_val_dataset)
-    # train_data.paired()
-
-    direction = top_transformer.direction.lower()
-    if pathlib.Path(top_transformer.load_path).is_file():
-        print(f"Loading Flow4Flow from model: {top_transformer.load_path}")
-        f4flow.load_state_dict(
-            torch.load(top_transformer.load_path, map_location=device)
-        )
-    elif direction == "alternate":
-        train_batch_iterate(
-            f4flow,
-            dataloader,
-            mcloader,
-            val_dataloader,
-            val_mcloader,
-            top_transformer.nepochs,
-            top_transformer.lr,
-            outputpath,
-            columns=columns,
-            condition_columns=condition_columns,
-            device=device,
-            gclip=top_transformer.gclip,
-            rng_plt=rng,
-            writer=writer,
-        )
-    elif direction == "forward":
-        train_forward(
-            f4flow,
-            dataloader,
-            mcloader,
-            val_dataloader,
-            val_mcloader,
-            top_transformer.nepochs,
-            top_transformer.lr,
-            outputpath,
-            columns=columns,
-            condition_columns=condition_columns,
-            device=device,
-            gclip=top_transformer.gclip,
-            rng_plt=rng,
-            writer=writer,
-        )
-
-    # dump test datasets
-    data_test_file = f"/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/data_{calo}_test.parquet"
-    mc_test_file = f"/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/preprocessed/mc_{calo}_test.parquet"
-
-    test_dataset = ParquetDataset(
-        files=data_test_file,
-        columns=all_columns,
-        scale_function=scale_func,
-        inverse_scale_function=scale_func_inv,
-        saturate=False
-    )
-    test_mc = ParquetDataset(
-        files=mc_test_file,
-        columns=all_columns,
-        scale_function=scale_func,
-        inverse_scale_function=scale_func_inv,
-        saturate=False
-    )
-    # shuffle test datasets
-    test_dataset.df = test_dataset.df.sample(frac=1).reset_index(drop=True)
-    test_mc.df = test_mc.df.sample(frac=1).reset_index(drop=True)
-    min_evs_test = min(len(test_dataset), len(test_mc))
-    test_dataset.df = test_dataset.df.iloc[:min_evs_test]
-    test_mc.df = test_mc.df.iloc[:min_evs_test]
-
-    f4flow = f4flow.to(device)
-    inputs = torch.tensor(test_mc.df.values[:, ncond:]).to(device)
-    context_l = torch.tensor(test_mc.df.values[:, :ncond]).to(device)
-    context_r = torch.tensor(test_dataset.df.values[:, :ncond]).to(device)
-    with torch.no_grad():
-        print("Transforming MC to data")
-        mc_to_data, _ = f4flow.batch_transform(
-            inputs, context_l, context_r, inverse=False
-        )
-        # mc_to_data, _ = f4flow.batch_transform(inputs, context_l, target_context=None, inverse=False, batch_size=10000)
-
-    # assign new columns
-    # so the df will have both the context and the transformed columns
-    for i, col in enumerate(columns):
-        test_mc.df[col] = mc_to_data[:, i].cpu().numpy()
-
-    # scale back
-    print("Scaling back")
-    test_mc.scale_back()
-    test_dataset.scale_back()
-
-    # plot histograms
-    print("Plotting histograms")
-    for col in columns:
-        fig, ax = plt.subplots()
-        ax.hist(test_mc.df[col], bins=100, density=True, label="MC")
-        ax.hist(test_dataset.df[col], bins=100, density=True, label="Data", alpha=0.5)
-        ax.legend()
-        ax.set_xlabel(col)
-        ax.set_ylabel("Events/binwidth")
-        fig.savefig(f"{outputpath_str}/hist_{col}.png")
-        plt.close(fig)
-
-    # dump to file as dataframe for future plotting
-    # df = pd.DataFrame(mc_to_data.cpu().numpy(), columns=all_columns)
-    print("Dumping to file")
-    print(test_mc.df.mean())
-    print(test_mc.df.std())
-    test_mc.df.to_parquet(f"{outputpath_str}/mc_to_data_{calo}.parquet")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        train_top(device, cfg)
 
 
 if __name__ == "__main__":
