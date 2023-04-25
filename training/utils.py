@@ -28,7 +28,6 @@ from ffflows.models import (
     DiscreteBaseFlowForFlow,
     DiscreteBaseConditionFlowForFlow,
     NoContextFlowForFlow,
-    CustomContextFlowForFlow,
 )
 from ffflows import distance_penalties
 from ffflows.distance_penalties import AnnealedPenalty

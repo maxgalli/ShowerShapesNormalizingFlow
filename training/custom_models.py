@@ -816,6 +816,9 @@ class FFFM(FlowM):
         self.flow_mc = flow_mc
         self.flow_data = flow_data
 
+    def forward(self, inputs, context, inverse):
+        return self.log_prob(inputs, context, inverse)
+
     def add_penalty(self, penalty_object):
         """Add a distance penaly object to the class."""
         assert isinstance(penalty_object, BasePenalty)
@@ -825,9 +828,9 @@ class FFFM(FlowM):
         self, inputs, context, inverse=False
     ):
         if inverse:
-            fnc = self.flow_data.log_prob
-        else:
             fnc = self.flow_mc.log_prob
+        else:
+            fnc = self.flow_data.log_prob
         logprob, logabsdet = fnc(inputs, context)
         return logprob + logabsdet
 
@@ -847,6 +850,4 @@ class FFFM(FlowM):
         )
         dist_pen = -self.distance_object(converted_input, inputs)
 
-        total_log_prob = log_prob + logabsdet + dist_pen
-
-        return total_log_prob#, log_prob, logabsdet, dist_pen
+        return log_prob, logabsdet, dist_pen

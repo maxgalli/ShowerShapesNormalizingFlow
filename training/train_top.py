@@ -18,7 +18,7 @@ import pickle as pkl
 import torch.multiprocessing as mp
 from torch.profiler import profile, record_function, ProfilerActivity
 
-from utils import ddp_setup, ParquetDataset, create_baseflow_model, sample_and_plot_base, set_penalty, transform_and_plot_top
+from utils import ddp_setup, ParquetDataset, create_baseflow_model, sample_and_plot_base, set_penalty, transform_and_plot_top, spline_inn
 from custom_models import create_mixture_flow_model, save_model, load_mixture_model, FFFM
 
 
@@ -70,6 +70,24 @@ def train_top(device, cfg, world_size=None, device_ids=None):
     flow_params_dct["mc_flow"] = model_mc
     flow_params_dct["data_flow"] = model_data
     model = create_mixture_flow_model(**flow_params_dct)
+    """
+    model = FFFM(
+        spline_inn(
+            inp_dim=input_dim,
+            nodes=128,
+            num_blocks=4,
+            num_stack=4,
+            tail_bound=1.0,
+            tails="linear",
+            num_bins=32,
+            context_features=context_dim,
+            dropout_probability=0.1,
+            flow_for_flow=True,
+        ),
+        flow_mc=model_mc,
+        flow_data=model_data, 
+    )
+    """
     set_penalty(
         model,
         cfg.model.penalty,
@@ -84,7 +102,7 @@ def train_top(device, cfg, world_size=None, device_ids=None):
             model,
             device_ids=[device],
             output_device=device,
-            #find_unused_parameters=True,
+            find_unused_parameters=True,
         )
         model = ddp_model.module
     else:
@@ -163,6 +181,17 @@ def train_top(device, cfg, world_size=None, device_ids=None):
         sampler=DistributedSampler(test_dataset_mc) if world_size is not None else None,
     )
 
+    # freeze base flows
+    for param in model_data.parameters():
+        param.requires_grad = False
+    for param in model_mc.parameters():
+        param.requires_grad = False
+    # check that are freezed also in the model
+    for param in model.flow_mc.parameters():
+        assert param.requires_grad == False
+    for param in model.flow_data.parameters():
+        assert param.requires_grad == False
+
     # train the model
     writer = SummaryWriter(log_dir="runs")
     optimizer = torch.optim.Adam(
@@ -174,6 +203,9 @@ def train_top(device, cfg, world_size=None, device_ids=None):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, cfg.epochs)
 
     train_history, test_history = [], []
+    train_history_1, test_history_1 = [], []
+    train_history_2, test_history_2 = [], []
+    train_history_3, test_history_3 = [], []
     
     for epoch in range(start_epoch, cfg.epochs + 1):
         if world_size is not None:
@@ -187,8 +219,10 @@ def train_top(device, cfg, world_size=None, device_ids=None):
         print(f"Epoch {epoch}/{cfg.epochs}:")
         epoch_is_even = epoch % 2 == 0
         start = time.time()
-        train_losses = []
-        test_losses = []
+        train_losses, test_losses = [], []
+        train_losses_1, test_losses_1 = [], []
+        train_losses_2, test_losses_2 = [], []
+        train_losses_3, test_losses_3 = [], []
         # train
         print("Training...")
         for i, (data, mc) in enumerate(zip(train_loader_data, train_loader_mc)):
@@ -202,9 +236,16 @@ def train_top(device, cfg, world_size=None, device_ids=None):
             
             optimizer.zero_grad()
             
-            loss = - model.log_prob(target, context, inverse=inverse)
+            loss1, loss2, loss3 = ddp_model(target, context, inverse=inverse)
+            loss = - loss1 - loss2 - loss3
             loss = loss.mean()
+            loss1 = loss1.mean()
+            loss2 = loss2.mean()
+            loss3 = loss3.mean()
             train_losses.append(loss.item())
+            train_losses_1.append(loss1.item())
+            train_losses_2.append(loss2.item())
+            train_losses_3.append(loss3.item())
 
             loss.backward()
             optimizer.step()
@@ -212,6 +253,9 @@ def train_top(device, cfg, world_size=None, device_ids=None):
         
         epoch_train_loss = np.mean(train_losses)
         train_history.append(epoch_train_loss)
+        epoch_train_loss_1 = np.mean(train_losses_1)
+        epoch_train_loss_2 = np.mean(train_losses_2)
+        epoch_train_loss_3 = np.mean(train_losses_3)
 
         # test
         print("Testing...")
@@ -223,17 +267,37 @@ def train_top(device, cfg, world_size=None, device_ids=None):
                 context, target = data
                 inverse = True
             with torch.no_grad():
-                loss = - model.log_prob(target, context, inverse=inverse)
+                loss1, loss2, loss3 = ddp_model(target, context, inverse=inverse)
+                loss = - loss1 - loss2 - loss3
                 loss = loss.mean()
+                loss1 = loss1.mean()
+                loss2 = loss2.mean()
+                loss3 = loss3.mean()
                 test_losses.append(loss.item())
+                test_losses_1.append(loss1.item())
+                test_losses_2.append(loss2.item())
+                test_losses_3.append(loss3.item())
 
         epoch_test_loss = np.mean(test_losses)
         test_history.append(epoch_test_loss)
+        epoch_test_loss_1 = np.mean(test_losses_1)
+        epoch_test_loss_2 = np.mean(test_losses_2)
+        epoch_test_loss_3 = np.mean(test_losses_3)
+        
         if device == 0 or world_size is None:
             writer.add_scalars(
-                "Losses", {"train": epoch_train_loss, "val": epoch_test_loss}, epoch
+                "Total Losses", {"train": epoch_train_loss, "val": epoch_test_loss}, epoch
             )
-
+            writer.add_scalars(
+                "Log prob base flow", {"train": epoch_train_loss_1, "val": epoch_test_loss_1}, epoch
+            )
+            writer.add_scalars(
+                "Logabsdet top transform", {"train": epoch_train_loss_2, "val": epoch_test_loss_2}, epoch
+            )
+            writer.add_scalars(
+                "Distance", {"train": epoch_train_loss_3, "val": epoch_test_loss_3}, epoch
+            )
+            
         # sample and validation
         if epoch % cfg.sample_every == 0 or epoch == 1:
             print("Sampling and plotting...")
