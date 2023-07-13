@@ -69,6 +69,12 @@ def train_top(device, cfg, world_size=None, device_ids=None):
 
     flow_params_dct["mc_flow"] = model_mc
     flow_params_dct["data_flow"] = model_data
+    penalty = {
+        "penalty_type": cfg.model.penalty,
+        "penalty_weight": cfg.model.penalty_weight,
+        "anneal": cfg.model.anneal,
+    }
+    flow_params_dct["penalty"] = penalty
     model = create_mixture_flow_model(**flow_params_dct)
     """
     model = FFFM(
@@ -88,12 +94,6 @@ def train_top(device, cfg, world_size=None, device_ids=None):
         flow_data=model_data, 
     )
     """
-    set_penalty(
-        model,
-        cfg.model.penalty,
-        cfg.model.penalty_weight,
-        cfg.model.anneal
-    )
     model = model.to(device)
     start_epoch = 1
 
@@ -316,6 +316,10 @@ def train_top(device, cfg, world_size=None, device_ids=None):
         print(
             f"Epoch {epoch} | GPU{device_id} | Rank {device} - train loss: {epoch_train_loss:.4f} - val loss: {epoch_test_loss:.4f} - time: {duration:.2f}s"
         )
+
+        #print([k for k in model.state_dict().keys() if "distance_object" in k])
+        #print(model.state_dict()["flow_data._transform._transforms.22.autoregressive_net.blocks.2.linear_layers.0.weight"])
+        #print(ddp_model.module.state_dict()["flow_data._transform._transforms.22.autoregressive_net.blocks.2.linear_layers.0.weight"])
 
         if device == 0 or world_size is None:
             save_model(

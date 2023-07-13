@@ -49,7 +49,7 @@ def dump_profile_plot(
 
 
 def plot_variable(
-    data_array, mc_array, mc_array_uncorr, variable_conf, output_dir, subdetector
+    data_array, mc_array, mc_array_uncorr, variable_conf, output_dirs, subdetector
 ):
     name = variable_conf["name"]
     title = variable_conf["title"] + "_" + subdetector
@@ -138,15 +138,39 @@ def plot_variable(
     down.set_yticks(y_minor_ticks, minor=True)
     down.grid(True, alpha=0.4, which="minor")
     up.legend()
-    fig.savefig(
-        output_dir + "/" + name + "_" + subdetector + ".pdf", bbox_inches="tight"
-    )
-    fig.savefig(
-        output_dir + "/" + name + "_" + subdetector + ".png", bbox_inches="tight"
-    )
     hep.cms.label(
         loc=0, data=True, llabel="Work in Progress", rlabel="", ax=up, pad=0.05
     )
+    for output_dir in output_dirs:
+        fig.savefig(
+            output_dir + "/" + name + "_" + subdetector + ".pdf", bbox_inches="tight"
+        )
+        fig.savefig(
+            output_dir + "/" + name + "_" + subdetector + ".png", bbox_inches="tight"
+        )
+
+    # now without reweighting
+    print("Plotting variable: {} (no reweighting)".format(name))
+    data_df = data_array
+    mc_df = mc_array_uncorr
+    mc_corr_df = mc_array
+    mn = min(data_df[name].min(), mc_df[name].min(), mc_corr_df[name].min())
+    mx = max(data_df[name].max(), mc_df[name].max(), mc_corr_df[name].max())
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.hist(data_df[name], bins=100, range=range, histtype="step", label="data", density=True)
+    ax.hist(mc_df[name], bins=100, range=range, histtype="step", label="MC", density=True)
+    ax.hist(mc_corr_df[name], bins=100, range=range, histtype="step", label="MC corrected", density=True)
+    ax.set_xlabel(name)
+    ax.set_ylabel("Density")
+    ax.legend()
+    for output_dir in output_dirs:
+        fig.savefig(
+            output_dir + "/" + name + "_" + subdetector + "_no_reweighting.pdf", bbox_inches="tight"
+        )
+        fig.savefig(
+            output_dir + "/" + name + "_" + subdetector + "_no_reweighting.png", bbox_inches="tight"
+        )
+   
     plt.close(fig)
 
 
@@ -162,7 +186,10 @@ def clf_reweight(df_mc, df_data, clf_name, n_jobs=1, cut=None):
                 "rb",
             )
         )
-        print("Loaded classifier from file {}.pkl".format(clf_name))
+        #print("Loaded classifier from file {}.pkl".format(clf_name))
+        #clf = xgb.Booster()
+        #clf.load_model(f"/work/gallim/devel/CQRRelatedStudies/NormalizingFlow/preprocess/{clf_name}.model")
+        #print("Loaded classifier from file {}.".format(clf_name))
     except FileNotFoundError:
         clf = xgb.XGBClassifier(
             learning_rate=0.05, n_estimators=500, max_depth=10, gamma=0, n_jobs=n_jobs
@@ -292,7 +319,7 @@ def main():
     print("Plotting distributions...")
     for var_conf in var_config_to_plot:
         plot_variable(
-            data_test_df, mc_test_df, mc_uncorr_test_df, var_conf, output_dir, calo
+            data_test_df, mc_test_df, mc_uncorr_test_df, var_conf, [output_dir], calo
         )
 
     print("Plotting profiles...")

@@ -55,6 +55,7 @@ class ParquetDataset(Dataset):
         target_variables,
         device=None,
         pipelines=None,
+        retrain_pipelines=False,
         rows=None,
     ):
         self.parquet_file = parquet_file
@@ -68,7 +69,8 @@ class ParquetDataset(Dataset):
         if self.pipelines is not None:
             for var, pipeline in self.pipelines.items():
                 if var in self.all_variables:
-                    data[var] = pipeline.transform(
+                    trans = pipeline.fit_transform if retrain_pipelines else pipeline.transform
+                    data[var] = trans(
                         data[var].values.reshape(-1, 1)
                     ).reshape(-1)
         if rows is not None:
@@ -411,6 +413,39 @@ def transform_and_plot_top(
             ax.set_ylabel(column)
             if writer is not None:
                 writer.add_figure(f"profiles_{column}_{cond_column}", fig, epoch)
+    
+    # sample back
+    data_pipeline = data_loader.dataset.pipelines
+    mc_pipeline = mc_loader.dataset.pipelines
+
+    ranges = {
+        "probe_r9": (0, 1.2),
+        "probe_s4": (0, 1.2),
+        "probe_sieie": (0.002, 0.014),
+        "probe_sieip": (-0.002, 0.002),
+        "probe_etaWidth": (0, 0.03),
+        "probe_phiWidth": (0, 0.1),
+    }
+    for var in target_variables:
+        data[var] = data_pipeline[var].inverse_transform(data[var].values.reshape(-1, 1)).reshape(-1)
+        mc[var] = mc_pipeline[var].inverse_transform(mc[var].values.reshape(-1, 1)).reshape(-1)
+        mc_corr[var] = mc_pipeline[var].inverse_transform(mc_corr[var].values.reshape(-1, 1)).reshape(-1)
+        rng = ranges[var]
+        fig, ax = plt.subplots(1, 1, figsize=(15, 10), tight_layout=True)
+        ax.hist(data[var], bins=100, histtype="step", label="data", range=rng)
+        for smp, name in zip([mc, mc_corr], ["mc", "mc corr"]):
+            ws = wasserstein_distance(data[var], smp[var])
+            ax.hist(
+                smp[var],
+                bins=100,
+                histtype="step",
+                label=f"{name} (wasserstein={ws:.3f})",
+                range=rng,
+            )
+        ax.set_xlabel(var)
+        ax.legend()
+        if device == 0 or type(device) != int:
+            writer.add_figure(f"{var}_reco_sampled_back", fig, epoch)
 
 
 def dump_validation_plots(

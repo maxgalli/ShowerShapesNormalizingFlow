@@ -17,6 +17,8 @@ from ffflows.distance_penalties import BasePenalty
 
 from inspect import signature
 
+from utils import set_penalty
+
 
 class NoMeanException(Exception):
     """Exception to be thrown when a mean function doesn't exist."""
@@ -620,7 +622,9 @@ class MaskedPiecewiseRationalQuadraticAutoregressiveTransformM(AutoregressiveTra
         return self._elementwise(inputs, autoregressive_params, inverse=True)
 
 
-def create_mixture_flow_model(input_dim, context_dim, base_kwargs, transform_type, mc_flow=None, data_flow=None):
+def create_mixture_flow_model(
+    input_dim, context_dim, base_kwargs, transform_type, mc_flow=None, data_flow=None, penalty=None
+):
     """Build NSF (neural spline flow) model. This uses the nsf module
     available at https://github.com/bayesiains/nsf.
     This models the posterior distribution p(x|y).
@@ -672,11 +676,17 @@ def create_mixture_flow_model(input_dim, context_dim, base_kwargs, transform_typ
 
     transform_fnal = transforms.CompositeTransform(transform)
 
-    if data_flow is None and mc_flow is None:
+    if data_flow is None and mc_flow is None and penalty is None:
         distribution = distributions.StandardNormal((input_dim,))
         flow = FlowM(transform_fnal, distribution)
     else:
         flow = FFFM(transform_fnal, mc_flow, data_flow)
+        set_penalty(
+            flow,
+            penalty["penalty_type"],
+            penalty["penalty_weight"], 
+            penalty["anneal"]
+        )
 
     # Store hyperparameters. This is for reconstructing model when loading from
     # saved file.
@@ -804,6 +814,42 @@ def load_mixture_model(device, model_dir=None, filename=None):
     )
 
 
+def load_fff_mixture_model(top_file, mc_file, data_file, top_penalty):
+    checkpoint_top = torch.load(top_file, map_location="cpu")
+    checkpoint_mc = torch.load(mc_file, map_location="cpu")
+    checkpoint_data = torch.load(data_file, map_location="cpu")
+
+    model_mc = create_mixture_flow_model(**checkpoint_mc["model_hyperparams"])
+    #model_mc.load_state_dict(checkpoint_mc["model_state_dict"])
+    #model_mc.eval()
+    model_data = create_mixture_flow_model(**checkpoint_data["model_hyperparams"])
+    #model_data.load_state_dict(checkpoint_data["model_state_dict"])
+    #model_data.eval()
+
+    model_top = create_mixture_flow_model(
+        **checkpoint_top["model_hyperparams"], mc_flow=model_mc, data_flow=model_data, penalty=top_penalty
+    )
+    #print(model_top.state_dict()["_distribution._transform._transforms.30.autoregressive_net.blocks.0.linear_layers.0.weight"])
+    model_top.load_state_dict(checkpoint_top["model_state_dict"])
+    #print(model_top.state_dict()["_distribution._transform._transforms.30.autoregressive_net.blocks.0.linear_layers.0.weight"])
+    model_top.eval()
+
+    scheduler_present_in_checkpoint = "scheduler_state_dict" in checkpoint_top.keys()
+
+    if len(checkpoint_top["optimizer_state_dict"]["param_groups"]) > 1:
+        flow_lr = checkpoint_top["last_lr"]
+    elif checkpoint_top["last_lr"] is not None:
+        flow_lr = checkpoint_top["last_lr"][0]
+    else:
+        flow_lr = None
+
+    epoch = checkpoint_top["epoch"]
+    train_history = checkpoint_top["train_history"]
+    test_history = checkpoint_top["test_history"]
+
+    return model_top, scheduler_present_in_checkpoint, flow_lr, epoch, train_history, test_history
+
+
 class FFFM(FlowM):
     """
     MC = left
@@ -811,10 +857,12 @@ class FFFM(FlowM):
     forward: MC -> Data
     inverse: Data -> MC
     """
+
     def __init__(self, transform, flow_mc, flow_data, embedding_net=None):
         super().__init__(transform, flow_mc, embedding_net)
         self.flow_mc = flow_mc
         self.flow_data = flow_data
+        self.distance_object = BasePenalty()
 
     def forward(self, inputs, context, inverse):
         return self.log_prob(inputs, context, inverse)
@@ -824,9 +872,7 @@ class FFFM(FlowM):
         assert isinstance(penalty_object, BasePenalty)
         self.distance_object = penalty_object
 
-    def base_flow_log_prob(
-        self, inputs, context, inverse=False
-    ):
+    def base_flow_log_prob(self, inputs, context, inverse=False):
         if inverse:
             fnc = self.flow_mc.log_prob
         else:
@@ -842,12 +888,8 @@ class FFFM(FlowM):
         return y, logabsdet
 
     def log_prob(self, inputs, context, inverse=False):
-        converted_input, logabsdet = self.transform(
-            inputs, context, inverse=inverse
-        )
-        log_prob = self.base_flow_log_prob(
-            converted_input, context, inverse=inverse
-        )
+        converted_input, logabsdet = self.transform(inputs, context, inverse=inverse)
+        log_prob = self.base_flow_log_prob(converted_input, context, inverse=inverse)
         dist_pen = -self.distance_object(converted_input, inputs)
 
         return log_prob, logabsdet, dist_pen
