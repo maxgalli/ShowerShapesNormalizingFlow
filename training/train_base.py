@@ -59,14 +59,17 @@ def train_base(device, cfg, world_size=None, device_ids=None):
 
     if cfg.checkpoint is not None:
         # assume that the checkpoint is path to a directory
-        model, _, _, start_epoch, _, _ = load_mixture_model(
+        model, _, _, start_epoch, th, _ = load_mixture_model(
             model, model_dir=cfg.checkpoint, filename="checkpoint-latest.pt"
         )
         model = model.to(device)
+        best_train_loss = np.min(th)
         print("Loaded model from checkpoint: ", cfg.checkpoint)
         print("Resuming from epoch ", start_epoch)
+        print("Best train loss found to be: ", best_train_loss)
     else:
         start_epoch = 1
+        best_train_loss = 10000000
 
     if world_size is not None:
         ddp_model = DDP(
@@ -99,7 +102,7 @@ def train_base(device, cfg, world_size=None, device_ids=None):
             train_file = "../../../preprocess/preprocessed/mc_ee_train.parquet"
             test_file = "../../../preprocess/preprocessed/mc_ee_test.parquet"
     
-    with open(f"../../../preprocess/preprocessed/pipelines_{sample}_{calo}.pkl", "rb") as file:
+    with open(f"../../../preprocess/preprocessed/pipelines_{calo}.pkl", "rb") as file:
         pipelines = pkl.load(file)
         pipelines = pipelines[cfg.pipelines]
 
@@ -220,12 +223,27 @@ def train_base(device, cfg, world_size=None, device_ids=None):
                 scheduler,
                 train_history,
                 test_history,
-                name="model",
+                name="checkpoint-latest.pt",
                 model_dir=".",
                 optimizer=optimizer,
                 is_ddp=world_size is not None,
-                save_both=epoch % cfg.sample_every == 0,
             )
+        
+        if epoch_train_loss < best_train_loss:
+            print("New best train loss, saving model...")
+            best_train_loss = epoch_train_loss
+            if device == 0 or world_size is None:
+                save_model(
+                    epoch,
+                    ddp_model,
+                    scheduler,
+                    train_history,
+                    test_history,
+                    name="best_train_loss.pt",
+                    model_dir=".",
+                    optimizer=optimizer,
+                    is_ddp=world_size is not None,
+                )
 
     writer.close()
 

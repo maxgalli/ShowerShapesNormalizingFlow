@@ -711,7 +711,6 @@ def save_model(
     model_dir=None,
     optimizer=None,
     is_ddp=False,
-    save_both=False,
 ):
     """Save a model and optimizer to file.
     Args:
@@ -721,12 +720,10 @@ def save_model(
         model_dir:  directory to save the model in
         filename:   filename for saved model
     """
-
     if model_dir is None:
         raise NameError("Model directory must be specified.")
 
-    filename = name + f"_@epoch_{epoch}.pt"
-    resume_filename = "checkpoint-latest.pt"
+    filename = name
 
     p = Path(model_dir)
     p.mkdir(parents=True, exist_ok=True)
@@ -746,9 +743,7 @@ def save_model(
         dict["scheduler_state_dict"] = scheduler.state_dict()
         dict["last_lr"] = scheduler.get_last_lr()
 
-    torch.save(dict, p / resume_filename)
-    if save_both:
-        torch.save(dict, p / filename)
+    torch.save(dict, p / filename)
 
 
 def load_mixture_model(device, model_dir=None, filename=None):

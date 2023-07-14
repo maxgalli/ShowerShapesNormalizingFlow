@@ -24,8 +24,8 @@ def main(cfg):
         OmegaConf.save(config=cfg, f=file)
    
     file_name = "checkpoint-latest.pt"
-    #top_file = os.path.join(cfg.top.path, file_name)
-    top_file = os.path.join(cfg.top.path, "model_@epoch_200.pt")
+    top_file = os.path.join(cfg.top.path, file_name)
+    #top_file = os.path.join(cfg.top.path, "model_@epoch_200.pt")
     mc_file = os.path.join(cfg.mc, file_name)
     data_file = os.path.join(cfg.data, file_name)
     print(f"Files:\n {top_file}\n {mc_file}\n {data_file}")
@@ -48,19 +48,15 @@ def main(cfg):
     data_df = data_df[:lim]
     mc_df = mc_df[:lim]
 
-    with open(f"../../../preprocess/preprocessed/pipelines_data_{calo}.pkl", "rb") as file:
+    with open(f"../../../preprocess/preprocessed/pipelines_{calo}.pkl", "rb") as file:
         pipelines_data = pkl.load(file)
         pipelines_data = pipelines_data[cfg.pipelines]
-
-    with open(f"../../../preprocess/preprocessed/pipelines_mc_{calo}.pkl", "rb") as file:
-        pipelines_mc = pkl.load(file)
-        pipelines_mc = pipelines_mc[cfg.pipelines]
 
     # preprocess
     for var in all_variables:
         try:
             data_df[var] = pipelines_data[var].transform(data_df[var].values.reshape(-1, 1)).reshape(-1)
-            mc_df[var] = pipelines_mc[var].transform(mc_df[var].values.reshape(-1, 1)).reshape(-1)
+            mc_df[var] = pipelines_data[var].transform(mc_df[var].values.reshape(-1, 1)).reshape(-1)
         except KeyError:
             pass
     
@@ -68,7 +64,7 @@ def main(cfg):
         test_file_mc,
         cfg.context_variables, 
         cfg.target_variables,
-        pipelines=pipelines_mc,
+        pipelines=pipelines_data,
         #retrain_pipelines=True,
         rows=lim
         )
@@ -105,7 +101,7 @@ def main(cfg):
     for var in all_variables:
         try:
             data_df[var] = pipelines_data[var].inverse_transform(data_df[var].values.reshape(-1, 1)).reshape(-1)
-            mc_df[var] = pipelines_mc[var].inverse_transform(mc_df[var].values.reshape(-1, 1)).reshape(-1)
+            mc_df[var] = pipelines_data[var].inverse_transform(mc_df[var].values.reshape(-1, 1)).reshape(-1)
         except KeyError:
             pass
     for var in cfg.target_variables:

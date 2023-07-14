@@ -9,6 +9,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.preprocessing import PowerTransformer
+from sklearn.preprocessing import QuantileTransformer
 import cloudpickle
 from copy import deepcopy
 import os
@@ -105,6 +106,11 @@ pipelines = {
         ),
     },
 }
+pipelines["pipe_unitarget"] = deepcopy(pipelines["pipe0"])
+for var in ["probe_r9", "probe_s4", "probe_sieie", "probe_etaWidth", "probe_sieip", "probe_phiWidth"]:
+    pipelines["pipe_unitarget"][var] = Pipeline(
+        [("qt", QuantileTransformer(n_quantiles=21, output_distribution="uniform")), ("scaler", MinMaxScaler((-1, 1)))]
+    ) 
 
 
 def main():
@@ -139,54 +145,80 @@ def main():
     mc_uncorr_df_eb = mc_uncorr_df[np.abs(mc_uncorr_df.probe_eta) < 1.4442]
     mc_uncorr_df_ee = mc_uncorr_df[np.abs(mc_uncorr_df.probe_eta) > 1.56]
 
-
-    output_names = ["data_eb", "data_ee", "mc_eb", "mc_ee"]
-    for name, df in zip(
-        output_names, [data_df_eb, data_df_ee, mc_uncorr_df_eb, mc_uncorr_df_ee]
-    ):
-        print(f"Processing {name}...")
-
+    dataframes = {
+        "eb": [data_df_eb, mc_uncorr_df_eb],
+        "ee": [data_df_ee, mc_uncorr_df_ee],
+    }
+    for calo in ["eb", "ee"]:
+        data_df, mc_df = dataframes[calo]
         # common cuts
-        df = df[df.probe_r9 < 1.2]
+        data_df = data_df[data_df.probe_r9 < 1.2]
+        mc_df = mc_df[mc_df.probe_r9 < 1.2]
 
-        df_train, df_test = train_test_split(df, test_size=0.2, random_state=42)
-        print(f"Train {name}: {len(df_train)}")
-        print(f"Test {name}: {len(df_test)}")
+        data_df_train, data_df_test = train_test_split(data_df, test_size=0.2, random_state=42)
+        mc_df_train, mc_df_test = train_test_split(mc_df, test_size=0.2, random_state=42)
 
         # save
-        for ext, df_ in zip(["train", "test"], [df_train, df_test]):
-            df_.to_parquet(f"{output_dir}/{name}_{ext}.parquet", engine="fastparquet")
+        for ext, df_ in zip(["train", "test"], [data_df_train, data_df_test]):
+            df_.to_parquet(f"{output_dir}/data_{calo}_{ext}.parquet", engine="fastparquet")
+        for ext, df_ in zip(["train", "test"], [mc_df_train, mc_df_test]):
+            df_.to_parquet(f"{output_dir}/mc_{calo}_{ext}.parquet", engine="fastparquet")
+   
+        for version in pipelines.keys(): 
+            dct = pipelines[version]
 
-        # plot
-        pipelines_copy = deepcopy(pipelines)
-        for version in pipelines_copy.keys():
-            dct = pipelines_copy[version]
+            # train transforms with full data
             for var, pipe in dct.items():
-                print(f"Plot {name} {version} {var}...")
-                cfg = [dct for dct in vars_config if dct["name"] == var][0]
                 fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-                arr = df_train[var].values
-                ax[0].hist(arr, bins=100, density=True, range=cfg["range"])
-                transformed_arr = pipe.fit_transform(arr.reshape(-1, 1))
-                ax[1].hist(transformed_arr, bins=100, density=True)
+                data_arr = data_df[var].values
+                mc_arr = mc_df[var].values
+                mn = min(data_arr.min(), mc_arr.min())
+                mx = max(data_arr.max(), mc_arr.max())
+                ax[0].hist(data_arr, bins=100, range=(mn, mx), histtype="step", label="data", density=True)
+                ax[0].hist(mc_arr, bins=100, range=(mn, mx), histtype="step", label="mc", alpha=0.5, density=True)
+                transformed_data_arr = pipe.fit_transform(data_arr.reshape(-1, 1))
+                transformed_mc_arr = pipe.transform(mc_arr.reshape(-1, 1))
+                mn = min(transformed_data_arr.min(), transformed_mc_arr.min())
+                mx = max(transformed_data_arr.max(), transformed_mc_arr.max())
+                ax[1].hist(transformed_data_arr, bins=100, range=(mn, mx), histtype="step", label="data", density=True)
+                ax[1].hist(transformed_mc_arr, bins=100, range=(mn, mx), histtype="step", label="mc", alpha=0.5, density=True)
                 ax[0].set_title(f"{var} before")
                 ax[1].set_title(f"{var} after")
+                ax[0].legend()
+                ax[1].legend()
                 ax[0].set_xlabel(var)
                 ax[1].set_xlabel(var)
-                fig.tight_layout()
                 for format in ["png", "pdf"]:
-                    fig.savefig(
-                        os.path.join(
-                            fig_output,
-                            f"{name}_{version}_{var}.{format}",
-                        )
-                    )
-        
-        # save pipelines
-        # we save one for each combination sample/calo, containing all the versions
-        # this way when we load them durtig the training the transformations are already fitted
-        with open(os.path.join(output_dir, f"pipelines_{name}.pkl"), "wb") as f:
-            cloudpickle.dump(pipelines_copy, f)
+                    fig.savefig(f"{fig_output}/{var}_{calo}_{version}.{format}")
+
+            for var, pipe in dct.items():
+                fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+                data_arr = data_df[var].values
+                mc_arr = mc_df[var].values
+                mn = min(data_arr.min(), mc_arr.min())
+                mx = max(data_arr.max(), mc_arr.max())
+                ax[0].hist(data_arr, bins=100, range=(mn, mx), histtype="step", label="data", density=True)
+                ax[0].hist(mc_arr, bins=100, range=(mn, mx), histtype="step", label="mc", alpha=0.5, density=True)
+                transformed_data_arr = pipe.fit_transform(data_arr.reshape(-1, 1))
+                transformed_mc_arr = pipe.transform(mc_arr.reshape(-1, 1))
+                mn = min(transformed_data_arr.min(), transformed_mc_arr.min())
+                mx = max(transformed_data_arr.max(), transformed_mc_arr.max())
+                ax[1].hist(transformed_data_arr, bins=21, range=(mn, mx), histtype="step", label="data", density=True)
+                ax[1].hist(transformed_mc_arr, bins=21, range=(mn, mx), histtype="step", label="mc", alpha=0.5, density=True)
+                ax[0].set_title(f"{var} before")
+                ax[1].set_title(f"{var} after")
+                ax[0].legend()
+                ax[1].legend()
+                ax[0].set_xlabel(var)
+                ax[1].set_xlabel(var)
+                for format in ["png", "pdf"]:
+                    fig.savefig(f"{fig_output}/{var}_{calo}_{version}_bin21.{format}")
+
+            # save pipelines
+            # we save one for each combination sample/calo, containing all the versions
+            # this way when we load them durtig the training the transformations are already fitted
+            with open(os.path.join(output_dir, f"pipelines_{calo}.pkl"), "wb") as f:
+                cloudpickle.dump(pipelines, f)
 
 
 if __name__ == "__main__":

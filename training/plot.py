@@ -109,6 +109,7 @@ def plot_variable(
         color="r",
         marker="o",
         linestyle="",
+        markersize=3,
     )
     down.plot(
         data_centers,
@@ -116,6 +117,7 @@ def plot_variable(
         color="b",
         marker="o",
         linestyle="",
+        markersize=3,
     )
 
     if name in ["probe_pfChargedIsoPFPV", "probe_pfPhoIso03"]:

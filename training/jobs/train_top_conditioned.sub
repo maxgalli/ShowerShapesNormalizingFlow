@@ -13,4 +13,4 @@
 #SBATCH --time=40:00:00
 #SBATCH --gres-flags=disable-binding    
 
-export CUDA_VISIBLE_DEVICES=2,3,4,5,6,7; /work/gallim/mambaforge/envs/FFF-minimal/bin/python /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training/train_top.py --config-name {param1} general.calo={param2}
+cd /work/gallim/devel/CQRRelatedStudies/NormalizingFlow/training; /work/gallim/mambaforge/envs/FFFShapes/bin/python train_top.py --config-name {param1} general.calo={param2}

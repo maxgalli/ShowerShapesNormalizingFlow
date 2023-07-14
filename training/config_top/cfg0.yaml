@@ -48,7 +48,7 @@ model:
   init_identity: True
   transform_type: rq-autoregressive
   penalty: l1
-  penalty_weight: 0.1
+  penalty_weight: 0.01
   anneal: 0
 optimizer:
   learning_rate: 1e-4
@@ -57,6 +57,6 @@ optimizer:
   weight_decay: 1e-5
 distributed: True
 #distributed: False
-epochs: 600
+epochs: 200
 sample_every: 10
 checkpoint: null

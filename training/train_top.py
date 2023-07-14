@@ -19,7 +19,7 @@ import torch.multiprocessing as mp
 from torch.profiler import profile, record_function, ProfilerActivity
 
 from utils import ddp_setup, ParquetDataset, create_baseflow_model, sample_and_plot_base, set_penalty, transform_and_plot_top, spline_inn
-from custom_models import create_mixture_flow_model, save_model, load_mixture_model, FFFM
+from custom_models import create_mixture_flow_model, save_model, load_mixture_model, FFFM, load_fff_mixture_model
 
 
 def train_top(device, cfg, world_size=None, device_ids=None):
@@ -58,12 +58,12 @@ def train_top(device, cfg, world_size=None, device_ids=None):
 
     model_data = create_mixture_flow_model(**flow_params_dct)
     model_data, _, _, _, _, _ = load_mixture_model(
-        model_data, model_dir=cfg.data.checkpoint, filename="checkpoint-latest.pt"
+        model_data, model_dir=cfg.data.checkpoint, filename="best_train_loss.pt"
     )
     model_data = model_data.to(device)
     model_mc = create_mixture_flow_model(**flow_params_dct).to(device)
     model_mc, _, _, _, _, _ = load_mixture_model(
-        model_mc, model_dir=cfg.mc.checkpoint, filename="checkpoint-latest.pt"
+        model_mc, model_dir=cfg.mc.checkpoint, filename="best_train_loss.pt"
     )
     model_mc = model_mc.to(device)
 
@@ -94,8 +94,20 @@ def train_top(device, cfg, world_size=None, device_ids=None):
         flow_data=model_data, 
     )
     """
-    model = model.to(device)
     start_epoch = 1
+    best_train_loss = np.inf
+    if cfg.checkpoint is not None:
+        model, _, _, start_epoch, th, _ = load_fff_mixture_model(
+            top_file=f"{cfg.checkpoint}/checkpoint-latest.pt",
+            mc_file=f"{cfg.mc.checkpoint}/best_train_loss.pt",
+            data_file=f"{cfg.data.checkpoint}/best_train_loss.pt",
+            top_penalty=penalty,
+        )
+        model_data = model.flow_data
+        model_mc = model.flow_mc
+        best_train_loss = np.min(th)
+        
+    model = model.to(device)
 
     if world_size is not None:
         ddp_model = DDP(
@@ -116,13 +128,9 @@ def train_top(device, cfg, world_size=None, device_ids=None):
     test_file_data = f"../../../preprocess/preprocessed/data_{calo}_test.parquet"
     test_file_mc = f"../../../preprocess/preprocessed/mc_{calo}_test.parquet"
 
-    with open(f"../../../preprocess/preprocessed/pipelines_data_{calo}.pkl", "rb") as file:
+    with open(f"../../../preprocess/preprocessed/pipelines_{calo}.pkl", "rb") as file:
         pipelines_data = pkl.load(file)
         pipelines_data = pipelines_data[cfg.pipelines]
-    
-    with open(f"../../../preprocess/preprocessed/pipelines_mc_{calo}.pkl", "rb") as file:
-        pipelines_mc = pkl.load(file)
-        pipelines_mc = pipelines_mc[cfg.pipelines]
     
     train_dataset_data = ParquetDataset(
         train_file_data,
@@ -157,7 +165,7 @@ def train_top(device, cfg, world_size=None, device_ids=None):
         cfg.context_variables,
         cfg.target_variables,
         device=device,
-        pipelines=pipelines_mc,
+        pipelines=pipelines_data,
         rows=cfg.train.size,
     )
     train_loader_mc = DataLoader(
@@ -171,7 +179,7 @@ def train_top(device, cfg, world_size=None, device_ids=None):
         cfg.context_variables,
         cfg.target_variables,
         device=device,
-        pipelines=pipelines_mc,
+        pipelines=pipelines_data,
         rows=cfg.test.size,
     )
     test_loader_mc = DataLoader(
@@ -328,12 +336,29 @@ def train_top(device, cfg, world_size=None, device_ids=None):
                 scheduler,
                 train_history,
                 test_history,
-                name="model",
+                name="checkpoint-latest.pt",
                 model_dir=".",
                 optimizer=optimizer,
                 is_ddp=world_size is not None,
-                save_both=epoch % cfg.sample_every == 0,
+                #save_both=epoch % cfg.sample_every == 0,
             )
+
+        if epoch_train_loss < best_train_loss:
+            print("New best train loss!")
+            best_train_loss = epoch_train_loss
+            if device == 0 or world_size is None:
+                save_model(
+                    epoch,
+                    ddp_model,
+                    scheduler,
+                    train_history,
+                    test_history,
+                    name="best_train_loss.pt",
+                    model_dir=".",
+                    optimizer=optimizer,
+                    is_ddp=world_size is not None,
+                    #save_both=epoch % cfg.sample_every == 0,
+                )
 
     writer.close()
 

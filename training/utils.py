@@ -262,11 +262,13 @@ def sample_and_plot_base(
         mn = min(reco[var].min(), samples[var].min())
         mx = max(reco[var].max(), samples[var].max())
         fig, ax = plt.subplots(1, 1, figsize=(15, 10), tight_layout=True)
-        ax.hist(reco[var], bins=100, histtype="step", label="reco", range=(mn, mx))
+        #ax.hist(reco[var], bins=100, histtype="step", label="reco", range=(mn, mx))
+        ax.hist(reco[var], bins=21, histtype="step", label="reco", range=(mn, mx))
         ws = wasserstein_distance(reco[var], samples[var])
         ax.hist(
             samples[var],
-            bins=100,
+            #bins=100,
+            bins=21,
             histtype="step",
             label=f"sampled (wasserstein={ws:.3f})",
             range=(mn, mx),
@@ -365,12 +367,14 @@ def transform_and_plot_top(
         mn = min(data[var].min(), mc[var].min(), mc_corr[var].min())
         mx = max(data[var].max(), mc[var].max(), mc_corr[var].max())
         fig, ax = plt.subplots(1, 1, figsize=(15, 10), tight_layout=True)
-        ax.hist(data[var], bins=100, histtype="step", label="data", range=(mn, mx))
+        #ax.hist(data[var], bins=100, histtype="step", label="data", range=(mn, mx))
+        ax.hist(data[var], bins=21, histtype="step", label="data", range=(mn, mx))
         for smp, name in zip([mc, mc_corr], ["mc", "mc corr"]):
             ws = wasserstein_distance(data[var], smp[var])
             ax.hist(
                 smp[var],
-                bins=100,
+                #bins=100,
+                bins=21,
                 histtype="step",
                 label=f"{name} (wasserstein={ws:.3f})",
                 range=(mn, mx),
@@ -446,6 +450,42 @@ def transform_and_plot_top(
         ax.legend()
         if device == 0 or type(device) != int:
             writer.add_figure(f"{var}_reco_sampled_back", fig, epoch)
+
+    # now plot profiles
+    nbins = 8
+    for column in target_variables:
+        for cond_column in context_variables:
+            fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+            data_ss_arr = data[column].values
+            data_cond_arr = data_context[cond_column].values
+            mc_uncorr_ss_arr = mc[column].values
+            mc_uncorr_cond_arr = mc_context[cond_column].values
+            mc_corr_ss_arr = mc_corr[column].values
+            mc_corr_cond_arr = mc_corr_context[cond_column].values
+            cond_edges = divide_dist(data_cond_arr, nbins)
+
+            for name, ss_arr, cond_arr, color in [
+                ("data", data_ss_arr, data_cond_arr, "blue"),
+                ("mc", mc_uncorr_ss_arr, mc_uncorr_cond_arr, "red"),
+                ("mc corr", mc_corr_ss_arr, mc_corr_cond_arr, "green"),
+            ]:
+                ax = dump_profile_plot(
+                    ax=ax,
+                    ss_name=column,
+                    cond_name=cond_column,
+                    sample_name=name,
+                    ss_arr=ss_arr,
+                    cond_arr=cond_arr,
+                    color=color,
+                    cond_edges=cond_edges,
+                )
+            ax.legend()
+            ax.set_xlabel(cond_column)
+            ax.set_ylabel(column)
+            if writer is not None:
+                writer.add_figure(f"profiles_{column}_{cond_column}_sampled_back", fig, epoch)
+    # close figures
+    plt.close("all")
 
 
 def dump_validation_plots(
