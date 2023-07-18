@@ -89,6 +89,59 @@ class ParquetDataset(Dataset):
         return self.context[idx], self.target[idx]
 
 
+class ParquetDatasetOne(Dataset):
+    def __init__(
+        self,
+        mc_parquet_file,
+        context_variables,
+        target_variables,
+        device=None,
+        pipelines=None,
+        retrain_pipelines=False,
+        rows=None,
+        data_parquet_file=None,
+    ):
+        self.context_variables = deepcopy(context_variables)
+        self.target_variables = deepcopy(target_variables)
+        self.all_variables = self.context_variables + self.target_variables
+        mc = pd.read_parquet(
+            mc_parquet_file, columns=self.all_variables, engine="fastparquet"
+        )
+        mc["lab"] = 1
+        if data_parquet_file is not None:
+            data = pd.read_parquet(
+                data_parquet_file, columns=self.all_variables, engine="fastparquet"
+            )
+            data["lab"] = 0
+            # concatenate
+            mc = pd.concat([data, mc])
+        self.context_variables.append("lab")
+        # shuffle
+        mc = mc.sample(frac=1).reset_index(drop=True)
+        self.pipelines = pipelines
+        if self.pipelines is not None:
+            for var, pipeline in self.pipelines.items():
+                if var in self.all_variables:
+                    trans = pipeline.fit_transform if retrain_pipelines else pipeline.transform
+                    mc[var] = trans(
+                        mc[var].values.reshape(-1, 1)
+                    ).reshape(-1)
+        if rows is not None:
+            mc = mc.iloc[:rows]
+        self.target = mc[target_variables].values
+        self.context = mc[context_variables].values
+        if device is not None:
+            self.target = torch.tensor(self.target, dtype=torch.float32).to(device)
+            self.context = torch.tensor(self.context, dtype=torch.float32).to(device)
+
+    def __len__(self):
+        assert len(self.context) == len(self.target)
+        return len(self.target)
+
+    def __getitem__(self, idx):
+        return self.context[idx], self.target[idx]
+
+
 class BaseFlow(flows.Flow):
     """
     Wrapper class around Base Flow for a flow for flow model.
@@ -226,6 +279,106 @@ def dump_profile_plot(
 
     return ax
 
+def plot_one(
+    mc_test_loader,
+    data_test_loader,
+    model,
+    epoch,
+    writer,
+    context_variables,
+    target_variables,
+    device,
+):
+    target_size = len(target_variables)
+    with torch.no_grad():
+        data_lst, mc_lst, mc_corr_lst = [], [], []
+        for (data_context, data_target), (mc_context, mc_target) in zip(
+            data_test_loader, mc_test_loader
+        ):
+            data_context = data_context.to(device)
+            data_target = data_target.to(device)
+            mc_context = mc_context.to(device)
+            mc_target = mc_target.to(device)
+            latent_mc = model._transform(mc_target, context=mc_context)[0]
+            # replace the last column in mc_context with 0 instead of 1
+            mc_context[:, -1] = 0
+            mc_target_corr = model._transform.inverse(latent_mc, context=mc_context)[0]
+            data_target = data_target.detach().cpu().numpy()
+            mc_target = mc_target.detach().cpu().numpy()
+            mc_target_corr = mc_target_corr.detach().cpu().numpy()
+            data_lst.append(data_target)
+            mc_lst.append(mc_target)
+            mc_corr_lst.append(mc_target_corr)
+    data = np.concatenate(data_lst, axis=0)
+    mc = np.concatenate(mc_lst, axis=0)
+    mc_corr = np.concatenate(mc_corr_lst, axis=0)
+    data = pd.DataFrame(data, columns=target_variables)
+    mc = pd.DataFrame(mc, columns=target_variables)
+    mc_corr = pd.DataFrame(mc_corr, columns=target_variables)
+
+    with open("../../../preprocess/var_specs.json", "r") as f:
+        lst = json.load(f)
+        original_ranges = {dct["name"]: dct["range"] for dct in lst}
+
+    # now plot the distributions of the target variables both unscaled back and scaled back
+    data_pipeline = data_test_loader.dataset.pipelines
+    mc_pipeline = mc_test_loader.dataset.pipelines
+    ranges = {
+        "probe_r9": (0, 1.2),
+        "probe_s4": (0, 1.2),
+        "probe_sieie": (0.002, 0.014),
+        "probe_sieip": (-0.002, 0.002),
+        "probe_etaWidth": (0, 0.03),
+        "probe_phiWidth": (0, 0.1),
+    }
+
+    for var in target_variables:
+        mn = min(data[var].min(), mc[var].min(), mc_corr[var].min())
+        mx = max(data[var].max(), mc[var].max(), mc_corr[var].max())
+        fig, ax = plt.subplots(1, 1, figsize=(15, 10), tight_layout=True)
+        ax.hist(
+            data[var],
+            bins=100,
+            histtype="step",
+            range=(mn, mx),
+            label="data",
+        )
+        for sample, label in zip([mc, mc_corr], ["mc", "mc_corr"]):
+            ws = wasserstein_distance(data[var], sample[var])
+            ax.hist(
+                sample[var],
+                bins=100,
+                histtype="step",
+                range=(mn, mx),
+                label=f"{label} (ws={ws:.2f})",
+            )
+        ax.set_xlabel(var)
+        ax.legend()
+        if device == 0 or type(device) != int:
+            writer.add_figure(f"{var}_distributions", fig, epoch)
+        plt.close(fig)
+        
+        fig_scaled, ax_scaled = plt.subplots(1, 1, figsize=(15, 10), tight_layout=True)
+        data[var] = data_pipeline[var].inverse_transform(data[var].values.reshape(-1, 1)).reshape(-1)
+        mc[var] = mc_pipeline[var].inverse_transform(mc[var].values.reshape(-1, 1)).reshape(-1)
+        mc_corr[var] = mc_pipeline[var].inverse_transform(mc_corr[var].values.reshape(-1, 1)).reshape(-1)
+        rng = ranges[var]
+        ax_scaled.hist(data[var], bins=100, histtype="step", label="data", range=rng)
+        for smp, name in zip([mc, mc_corr], ["mc", "mc corr"]):
+            ws = wasserstein_distance(data[var], smp[var])
+            ax_scaled.hist(
+                smp[var],
+                bins=100,
+                histtype="step",
+                label=f"{name} (wasserstein={ws:.3f})",
+                range=rng,
+            )
+        ax_scaled.set_xlabel(var)
+        ax_scaled.legend()
+        if device == 0 or type(device) != int:
+            writer.add_figure(f"{var}_distributions_sampled_back", fig_scaled, epoch)
+        plt.close(fig_scaled)
+   
 
 def sample_and_plot_base(
     test_loader,
@@ -262,13 +415,13 @@ def sample_and_plot_base(
         mn = min(reco[var].min(), samples[var].min())
         mx = max(reco[var].max(), samples[var].max())
         fig, ax = plt.subplots(1, 1, figsize=(15, 10), tight_layout=True)
-        #ax.hist(reco[var], bins=100, histtype="step", label="reco", range=(mn, mx))
-        ax.hist(reco[var], bins=21, histtype="step", label="reco", range=(mn, mx))
+        ax.hist(reco[var], bins=100, histtype="step", label="reco", range=(mn, mx))
+        #ax.hist(reco[var], bins=21, histtype="step", label="reco", range=(mn, mx))
         ws = wasserstein_distance(reco[var], samples[var])
         ax.hist(
             samples[var],
-            #bins=100,
-            bins=21,
+            bins=100,
+            #bins=21,
             histtype="step",
             label=f"sampled (wasserstein={ws:.3f})",
             range=(mn, mx),
