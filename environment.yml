@@ -1,5 +1,6 @@
 name: FFFShapes
 channels:
+  - anaconda
   - astropy
   - nvidia
   - defaults
@@ -7,6 +8,7 @@ channels:
 dependencies:
   - _libgcc_mutex=0.1=conda_forge
   - _openmp_mutex=4.5=2_gnu
+  - _py-xgboost-mutex=2.0=cpu_0
   - abseil-cpp=20210324.1=h9c3ff4c_0
   - afterimage=1.21=ha9998ff_1003
   - aiofiles=22.1.0=pyhd8ed1ab_0
@@ -49,10 +51,10 @@ dependencies:
   - bzip2=1.0.8=h7f98852_4
   - c-ares=1.18.1=h7f98852_0
   - c-compiler=1.3.0=h7f98852_0
-  - ca-certificates=2023.01.10=h06a4308_0
+  - ca-certificates=2023.7.22=hbcca054_0
   - cachetools=5.3.0=pyhd8ed1ab_0
   - cairo=1.16.0=h18b612c_1001
-  - certifi=2022.12.7=pyhd8ed1ab_0
+  - certifi=2023.7.22=pyhd8ed1ab_0
   - cffi=1.14.4=py38ha312104_0
   - cfitsio=3.470=hb418390_7
   - cftime=1.6.2=py38h7deecbd_0
@@ -85,6 +87,7 @@ dependencies:
   - expat=2.5.0=h27087fc_0
   - fastparquet=2023.2.0=py38h7e4f40d_0
   - fftw=3.3.10=nompi_hf0379b8_106
+  - flake8=6.0.0=py38h06a4308_0
   - flit-core=3.8.0=pyhd8ed1ab_0
   - font-ttf-dejavu-sans-mono=2.37=hab24e00_0
   - font-ttf-inconsolata=3.000=h77eed37_0
@@ -129,6 +132,7 @@ dependencies:
   - hdf4=4.2.13=h3ca952b_2
   - hdf5=1.10.6=h3ffc7dd_1
   - heapdict=1.0.1=py_0
+  - hep_ml=0.7.2=pyhd8ed1ab_0
   - hist=2.6.3=pyhd8ed1ab_0
   - histoprint=2.4.0=pyhd8ed1ab_0
   - icu=58.2=hf484d3e_1000
@@ -207,6 +211,7 @@ dependencies:
   - libwebp=1.2.4=h11a3e52_1
   - libwebp-base=1.2.4=h166bdaf_0
   - libxcb=1.13=h7f98852_1004
+  - libxgboost=1.7.6=cpu_h6728c87_2
   - libxml2=2.10.3=hcbfbd50_0
   - libzip=1.5.1=h8d318fa_1004
   - libzlib=1.2.13=h166bdaf_4
@@ -218,6 +223,7 @@ dependencies:
   - markupsafe=2.1.2=py38h1de0b5d_0
   - matplotlib-base=3.7.1=py38hd6c3c57_0
   - matplotlib-inline=0.1.6=pyhd8ed1ab_0
+  - mccabe=0.7.0=pyhd3eb1b0_0
   - mdurl=0.1.0=pyhd8ed1ab_0
   - metakernel=0.29.4=pyhd8ed1ab_0
   - mistune=2.0.5=pyhd8ed1ab_0
@@ -243,7 +249,7 @@ dependencies:
   - nvidia-ml-py=11.495.46=pyhd8ed1ab_0
   - olefile=0.46=pyh9f0ad1d_1
   - openjpeg=2.4.0=hb52868f_1
-  - openssl=1.1.1t=h0b41bf4_0
+  - openssl=1.1.1w=hd590300_0
   - orc=1.6.7=h89a63ab_2
   - packaging=23.0=pyhd8ed1ab_0
   - pandas=1.5.3=py38hdc8b05c_0
@@ -271,9 +277,11 @@ dependencies:
   - pthread-stubs=0.4=h36c2ea0_1001
   - ptyprocess=0.7.0=pyhd3deb0d_0
   - pure_eval=0.2.2=pyhd8ed1ab_0
-  - pyarrow=4.0.0=py38hc9229eb_3_cpu
+  - py-xgboost=1.7.6=cpu_py38hfe6c714_2
+  - pycodestyle=2.10.0=py38h06a4308_0
   - pycparser=2.21=pyhd8ed1ab_0
   - pydantic=1.10.6=py38h1de0b5d_0
+  - pyflakes=3.0.1=py38h06a4308_0
   - pygments=2.14.0=pyhd8ed1ab_0
   - pyopenssl=23.0.0=pyhd8ed1ab_0
   - pyparsing=3.0.9=pyhd8ed1ab_0
@@ -342,6 +350,7 @@ dependencies:
   - websocket-client=1.5.1=pyhd8ed1ab_0
   - wheel=0.40.0=pyhd8ed1ab_0
   - xarray=2022.11.0=py38h06a4308_0
+  - xgboost=1.7.6=cpu_py38hfe6c714_2
   - xorg-fixesproto=5.0=h7f98852_1002
   - xorg-kbproto=1.0.7=h7f98852_1002
   - xorg-libice=1.0.10=h7f98852_0
@@ -374,14 +383,19 @@ dependencies:
   - pip:
     - absl-py==1.4.0
     - antlr4-python3-runtime==4.9.3
+    - arrow==1.2.3
     - cmake==3.26.0
+    - ffflows==0.1.0
     - filelock==3.10.0
+    - fqdn==1.5.1
     - future==0.18.2
     - google-auth==2.16.0
     - google-auth-oauthlib==0.4.6
     - grpcio==1.51.1
     - h5py==3.8.0
     - hydra-core==1.3.1
+    - isoduration==20.11.0
+    - jsonpointer==2.4
     - lit==15.0.7
     - markdown==3.4.1
     - mpmath==1.3.0
@@ -401,8 +415,10 @@ dependencies:
     - oauthlib==3.2.2
     - omegaconf==2.3.0
     - protobuf==3.20.3
+    - pyarrow==7.0.0
     - pyasn1==0.4.8
     - pyasn1-modules==0.2.8
+    - python-graphviz==0.20.1
     - requests-oauthlib==1.3.1
     - rsa==4.9
     - sympy==1.11.1
@@ -414,5 +430,6 @@ dependencies:
     - torchvision==0.15.1
     - triton==2.0.0
     - umnn==1.68
+    - uri-template==1.3.0
+    - webcolors==1.13
     - werkzeug==2.2.2
-prefix: /work/gallim/mambaforge/envs/FlashSimStudies
